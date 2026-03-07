@@ -5,7 +5,7 @@ browser:
   # 指纹浏览器（fingerprint-chromium）可执行文件路径
   # 留空则使用默认值：macOS /Applications/Chromium.app/Contents/MacOS/Chromium
   # Linux 示例：/usr/bin/chromium 或 /opt/fingerprint-chromium/chrome
-  chromium_bin: '/Applications/Chromium.app/Contents/MacOS/Chromium'
+  chromium_bin: '/usr/bin/chromium'
 
   # 是否启用无头模式（headless）
   # 默认 false。优先推荐 Linux + Xvfb，这样仍然是“有界面浏览器”，兼容性更稳。
