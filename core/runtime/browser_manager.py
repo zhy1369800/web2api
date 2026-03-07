@@ -191,7 +191,7 @@ class BrowserManager:
             "--no-instance-limit",
             "--new-window",
             "--remote-allow-origins=*",
-        ]
+        ])
         if self._headless:
             args.extend(
                 [
