@@ -172,8 +172,13 @@ class BrowserManager:
             f"--load-extension={extension_path}",
             f"--user-data-dir={udd}",
             f"--timezone={proxy_key.timezone or TIMEZONE}",
-            f"--proxy-server=http://{proxy_key.proxy_host}",
-            "--proxy-bypass-list=127.0.0.1;localhost",
+        ]
+        if proxy_key.proxy_host:
+            args.extend([
+                f"--proxy-server={proxy_key.proxy_host if '://' in proxy_key.proxy_host else 'http://' + proxy_key.proxy_host}",
+                "--proxy-bypass-list=127.0.0.1;localhost",
+            ])
+        args.extend([
             "--remote-debugging-address=127.0.0.1",
             "--force-webrtc-ip-handling-policy",
             "--webrtc-ip-handling-policy=disable_non_proxied_udp",
