@@ -629,6 +629,7 @@ class ChatHandler:
             / "debug"
             / "chat_prompt_debug.json"
         )
+        debug_path.parent.mkdir(parents=True, exist_ok=True)
 
         max_retries = 3
         for attempt in range(max_retries):

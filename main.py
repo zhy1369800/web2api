@@ -28,7 +28,7 @@ def main() -> int:
     port = int(get("server", "port") or 8001)
     uvicorn.run(
         "core.app:app",
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=port,
         reload=False,
     )

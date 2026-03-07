@@ -210,6 +210,7 @@ async def stream_raw_via_page_fetch(
         fetch_task = asyncio.create_task(run_fetch())
         try:
             headers = None
+            logger.info(f"[fetch] starting with binding {BINDING_NAME} for url {url}")
             while True:
                 try:
                     chunk = await asyncio.wait_for(
@@ -219,14 +220,16 @@ async def stream_raw_via_page_fetch(
                     logger.warning("流式读取超时")
                     break
                 if chunk == "__done__":
+                    logger.info("[fetch] received __done__")
                     break
                 if chunk.startswith("__headers__:"):
                     try:
                         headers = json.loads(chunk[12:])
+                        logger.info(f"[fetch] received headers: {headers}")
                         if on_headers and isinstance(headers, dict):
                             on_headers({k: str(v) for k, v in headers.items()})
                     except (json.JSONDecodeError, TypeError) as e:
-                        logger.debug("[fetch] 解析 __headers__ 失败: %s", e)
+                        logger.debug("[fetch] 解析 __headers__ 失败: %s, chunk: %s", e, chunk)
                     continue
                 if chunk.startswith("__error__:"):
                     msg = chunk[10:].strip()
@@ -244,7 +247,7 @@ async def stream_raw_via_page_fetch(
                         continue
                     logger.warning("[fetch] __error__ from page before terminal event: %s", msg)
                     raise RuntimeError(msg)
-                    continue
+                logger.debug(f"[fetch] received chunk (len={len(chunk)})")
                 yield chunk
         finally:
             try:

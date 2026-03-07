@@ -163,12 +163,21 @@ class ClaudePlugin(BaseSitePlugin):
     async def fetch_workspace(self, context: BrowserContext) -> dict[str, Any] | None:
         resp = await context.request.get(f"{self.api_base}/account", timeout=15000)
         if resp.status != 200:
+            text = (await resp.text())[:500]
+            logger.warning("[%s] fetch_workspace 状态码错误 %s: %s", self.type_name, resp.status, text)
             await resp.dispose()
             return None
-        data = await resp.json()
+        try:
+            data = await resp.json()
+        except Exception:
+            text = (await resp.text())[:500]
+            logger.error("[%s] fetch_workspace 返回非 JSON 内容: %s", self.type_name, text)
+            await resp.dispose()
+            return None
         await resp.dispose()
         memberships = data.get("memberships") or []
         if not memberships:
+            logger.warning("[%s] fetch_workspace 未找到 memberships", self.type_name)
             return None
         org = memberships[0].get("organization") or {}
         org_uuid = org.get("uuid")
@@ -181,18 +190,26 @@ class ClaudePlugin(BaseSitePlugin):
     ) -> str | None:
         org_uuid = workspace["org_uuid"]
         url = f"{self.api_base}/organizations/{org_uuid}/chat_conversations"
+        # 尝试使用通用的模型名称，防止硬编码导致 400
+        model_name = "claude-3-5-sonnet-20241022" 
         resp = await context.request.post(
             url,
-            data=json.dumps({"name": "", "model": "claude-sonnet-4-5-20250929"}),
+            data=json.dumps({"name": "", "model": model_name}),
             headers={"Content-Type": "application/json"},
             timeout=15000,
         )
         if resp.status not in (200, 201):
             text = (await resp.text())[:500]
+            logger.warning("[%s] 创建会话失败 状态码=%s: %s", self.type_name, resp.status, text)
             await resp.dispose()
-            logger.warning("创建会话失败 %s: %s", resp.status, text)
             return None
-        data = await resp.json()
+        try:
+            data = await resp.json()
+        except Exception:
+            text = (await resp.text())[:500]
+            logger.error("[%s] 创建会话返回非 JSON 内容: %s", self.type_name, text)
+            await resp.dispose()
+            return None
         await resp.dispose()
         return data.get("uuid")
 

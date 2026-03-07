@@ -170,17 +170,22 @@ class BrowserManager:
             self._chromium_bin,
             f"--remote-debugging-port={port}",
             f"--load-extension={extension_path}",
-            f"--fingerprint={proxy_key.fingerprint_id}",
-            "--fingerprint-platform=windows",
-            "--fingerprint-brand=Edge",
             f"--user-data-dir={udd}",
             f"--timezone={proxy_key.timezone or TIMEZONE}",
             f"--proxy-server=http://{proxy_key.proxy_host}",
+            "--proxy-bypass-list=127.0.0.1;localhost",
+            "--remote-debugging-address=127.0.0.1",
             "--force-webrtc-ip-handling-policy",
             "--webrtc-ip-handling-policy=disable_non_proxied_udp",
             "--disable-features=AsyncDNS",
             "--no-first-run",
             "--no-default-browser-check",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-instance-limit",
+            "--new-window",
+            "--remote-allow-origins=*",
         ]
         if self._headless:
             args.extend(
@@ -197,9 +202,10 @@ class BrowserManager:
         return subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=env,
+            text=True,
         )
 
     async def ensure_browser(
@@ -233,6 +239,9 @@ class BrowserManager:
         ok = await _wait_for_cdp("127.0.0.1", port)
         if not ok:
             self._available_ports.add(port)
+            out, err = proc.communicate(timeout=2)
+            if out: logger.error(f"Chromium STDOUT: {out}")
+            if err: logger.error(f"Chromium STDERR: {err}")
             try:
                 proc.terminate()
                 proc.wait(timeout=5)
@@ -242,7 +251,7 @@ class BrowserManager:
 
         if self._playwright is None:
             self._playwright = await async_playwright().start()
-        endpoint = f"http://127.0.0.1:{port}"
+        endpoint = f"http://localhost:{port}"  # 尝试使用 localhost 而非 127.0.0.1
         browser = await self._playwright.chromium.connect_over_cdp(
             endpoint, timeout=10000
         )
