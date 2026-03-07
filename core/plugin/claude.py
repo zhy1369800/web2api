@@ -161,27 +161,29 @@ class ClaudePlugin(BaseSitePlugin):
     # ---- 5 个必须实现的 hook ----
 
     async def fetch_workspace(self, context: BrowserContext) -> dict[str, Any] | None:
-        resp = await context.request.get(f"{self.api_base}/account", timeout=15000)
-        if resp.status != 200:
-            text = (await resp.text())[:500]
-            logger.warning("[%s] fetch_workspace 状态码错误 %s: %s", self.type_name, resp.status, text)
-            await resp.dispose()
-            return None
+        # 在真实页面内通过 evaluate 手动发请求，绕过 Cloudflare 校验
+        page = context.pages[0] if context.pages else await context.new_page()
         try:
-            data = await resp.json()
-        except Exception:
-            text = (await resp.text())[:500]
-            logger.error("[%s] fetch_workspace 返回非 JSON 内容: %s", self.type_name, text)
-            await resp.dispose()
+            data = await page.evaluate("""
+                async (url) => {
+                    const r = await fetch(url);
+                    if (r.status !== 200) return { error: await r.text(), status: r.status };
+                    return await r.json();
+                }
+            """, f"{self.api_base}/account")
+            if not isinstance(data, dict) or "error" in data:
+                logger.warning("[%s] fetch_workspace 页面代发失败: %s", self.type_name, data)
+                return None
+            memberships = data.get("memberships") or []
+            if not memberships:
+                logger.warning("[%s] fetch_workspace 未找到 memberships", self.type_name)
+                return None
+            org = memberships[0].get("organization") or {}
+            org_uuid = org.get("uuid")
+            return {"org_uuid": org_uuid} if org_uuid else None
+        except Exception as e:
+            logger.error("[%s] fetch_workspace evaluate 异常: %s", self.type_name, e)
             return None
-        await resp.dispose()
-        memberships = data.get("memberships") or []
-        if not memberships:
-            logger.warning("[%s] fetch_workspace 未找到 memberships", self.type_name)
-            return None
-        org = memberships[0].get("organization") or {}
-        org_uuid = org.get("uuid")
-        return {"org_uuid": org_uuid} if org_uuid else None
 
     async def create_session(
         self,
@@ -190,28 +192,27 @@ class ClaudePlugin(BaseSitePlugin):
     ) -> str | None:
         org_uuid = workspace["org_uuid"]
         url = f"{self.api_base}/organizations/{org_uuid}/chat_conversations"
-        # 尝试使用通用的模型名称，防止硬编码导致 400
         model_name = "claude-3-5-sonnet-20241022" 
-        resp = await context.request.post(
-            url,
-            data=json.dumps({"name": "", "model": model_name}),
-            headers={"Content-Type": "application/json"},
-            timeout=15000,
-        )
-        if resp.status not in (200, 201):
-            text = (await resp.text())[:500]
-            logger.warning("[%s] 创建会话失败 状态码=%s: %s", self.type_name, resp.status, text)
-            await resp.dispose()
-            return None
+        page = context.pages[0] if context.pages else await context.new_page()
         try:
-            data = await resp.json()
-        except Exception:
-            text = (await resp.text())[:500]
-            logger.error("[%s] 创建会话返回非 JSON 内容: %s", self.type_name, text)
-            await resp.dispose()
+            data = await page.evaluate("""
+                async ({ url, body }) => {
+                    const r = await fetch(url, {
+                        method: "POST",
+                        body: JSON.stringify(body),
+                        headers: { "Content-Type": "application/json" }
+                    });
+                    if (r.status !== 200 && r.status !== 201) return { error: await r.text(), status: r.status };
+                    return await r.json();
+                }
+            """, {"url": url, "body": {"name": "", "model": model_name}})
+            if not isinstance(data, dict) or "error" in data:
+                logger.warning("[%s] create_session 页面代发失败: %s", self.type_name, data)
+                return None
+            return data.get("uuid")
+        except Exception as e:
+            logger.error("[%s] create_session evaluate 异常: %s", self.type_name, e)
             return None
-        await resp.dispose()
-        return data.get("uuid")
 
     def build_completion_url(self, session_id: str, state: dict[str, Any]) -> str:
         org_uuid = state["workspace"]["org_uuid"]
