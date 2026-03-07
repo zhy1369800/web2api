@@ -202,10 +202,9 @@ class BrowserManager:
         return subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             env=env,
-            text=True,
         )
 
     async def ensure_browser(
@@ -239,9 +238,6 @@ class BrowserManager:
         ok = await _wait_for_cdp("127.0.0.1", port)
         if not ok:
             self._available_ports.add(port)
-            out, err = proc.communicate(timeout=2)
-            if out: logger.error(f"Chromium STDOUT: {out}")
-            if err: logger.error(f"Chromium STDERR: {err}")
             try:
                 proc.terminate()
                 proc.wait(timeout=5)
