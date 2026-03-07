@@ -238,9 +238,10 @@ def _raw_to_groups(raw: list[dict[str, Any]]) -> list[ProxyGroupConfig]:
                         name=name, type=type_, auth=auth, unfreeze_at=unfreeze_at
                     )
                 )
+        proxy_host = str(g.get("proxy_host", "")).strip()
         groups.append(
             ProxyGroupConfig(
-                proxy_host=str(g.get("proxy_host", "")),
+                proxy_host=proxy_host,
                 proxy_user=str(g.get("proxy_user", "")),
                 proxy_pass=str(g.get("proxy_pass", "")),
                 fingerprint_id=str(g.get("fingerprint_id", "")),
