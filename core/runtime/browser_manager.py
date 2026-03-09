@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,6 +85,7 @@ class BrowserEntry:
     port: int
     browser: Browser
     context: BrowserContext
+    stderr_path: Path | None = None
     tabs: dict[str, TabRuntime] = field(default_factory=dict)
     last_used_at: float = field(default_factory=time.time)
 
@@ -120,6 +122,35 @@ class BrowserManager:
         self._available_ports: set[int] = set(self._port_range)
         self._playwright: Any = None
 
+    def _stderr_log_path(self, proxy_key: ProxyKey, port: int) -> Path:
+        log_dir = Path(tempfile.gettempdir()) / "web2api-browser-logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        return log_dir / (
+            f"{proxy_key.fingerprint_id}-{port}-{int(time.time())}.stderr.log"
+        )
+
+    @staticmethod
+    def _read_stderr_tail(stderr_path: Path | None, max_chars: int = 4000) -> str:
+        if stderr_path is None or not stderr_path.exists():
+            return ""
+        try:
+            content = stderr_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return ""
+        content = content.strip()
+        if not content:
+            return ""
+        return content[-max_chars:]
+
+    @staticmethod
+    def _cleanup_stderr_log(stderr_path: Path | None) -> None:
+        if stderr_path is None:
+            return
+        try:
+            stderr_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
     def current_proxy_keys(self) -> list[ProxyKey]:
         return list(self._entries.keys())
 
@@ -154,7 +185,7 @@ class BrowserManager:
         proxy_key: ProxyKey,
         proxy_pass: str,
         port: int,
-    ) -> subprocess.Popen[Any]:
+    ) -> tuple[subprocess.Popen[Any], Path]:
         """启动 Chromium 进程（代理 + 扩展），使用指定 port。"""
         udd = user_data_dir(proxy_key.fingerprint_id)
         udd.mkdir(parents=True, exist_ok=True)
@@ -214,13 +245,19 @@ class BrowserManager:
         env["NODE_OPTIONS"] = (
             env.get("NODE_OPTIONS") or ""
         ).strip() + " --no-deprecation"
-        return subprocess.Popen(
-            args,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=env,
-        )
+        stderr_path = self._stderr_log_path(proxy_key, port)
+        stderr_fp = stderr_path.open("ab")
+        try:
+            proc = subprocess.Popen(
+                args,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_fp,
+                env=env,
+            )
+        finally:
+            stderr_fp.close()
+        return proc, stderr_path
 
     async def ensure_browser(
         self,
@@ -243,7 +280,7 @@ class BrowserManager:
                 "无可用 CDP 端口，当前并发浏览器数已达上限，请稍后重试或增大 cdp_port_count"
             )
         port = self._available_ports.pop()
-        proc = self._launch_process(proxy_key, proxy_pass, port)
+        proc, stderr_path = self._launch_process(proxy_key, proxy_pass, port)
         logger.info(
             "已启动 Chromium PID=%s port=%s mode=%s headless=%s no_sandbox=%s disable_gpu=%s disable_gpu_sandbox=%s，等待 CDP 就绪...",
             proc.pid,
@@ -262,24 +299,54 @@ class BrowserManager:
                 proc.wait(timeout=5)
             except Exception:
                 pass
+            stderr_tail = self._read_stderr_tail(stderr_path)
+            self._cleanup_stderr_log(stderr_path)
+            if stderr_tail:
+                logger.error(
+                    "Chromium 启动失败，CDP 未就绪。stderr tail:\n%s",
+                    stderr_tail,
+                )
             raise RuntimeError("CDP 未在预期时间内就绪")
 
         if self._playwright is None:
             self._playwright = await async_playwright().start()
         endpoint = f"http://127.0.0.1:{port}"
-        browser = await self._playwright.chromium.connect_over_cdp(
-            endpoint, timeout=10000
-        )
+        try:
+            browser = await self._playwright.chromium.connect_over_cdp(
+                endpoint, timeout=10000
+            )
+        except Exception:
+            self._available_ports.add(port)
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            stderr_tail = self._read_stderr_tail(stderr_path)
+            self._cleanup_stderr_log(stderr_path)
+            if stderr_tail:
+                logger.error(
+                    "Chromium 已监听 CDP 但 connect_over_cdp 失败。stderr tail:\n%s",
+                    stderr_tail,
+                )
+            raise
         context = browser.contexts[0] if browser.contexts else None
         if context is None:
             await browser.close()
             self._available_ports.add(port)
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            self._cleanup_stderr_log(stderr_path)
             raise RuntimeError("浏览器无默认 context")
         self._entries[proxy_key] = BrowserEntry(
             proc=proc,
             port=port,
             browser=browser,
             context=context,
+            stderr_path=stderr_path,
         )
         return context
 
@@ -530,6 +597,7 @@ class BrowserManager:
             entry.proc.wait(timeout=3)
         except Exception as e:
             logger.warning("关闭浏览器进程时异常: %s", e)
+        self._cleanup_stderr_log(entry.stderr_path)
         self._available_ports.add(entry.port)
         del self._entries[proxy_key]
         logger.info(

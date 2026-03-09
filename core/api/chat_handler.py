@@ -98,7 +98,7 @@ class ChatHandler:
         )
         self._tab_idle_seconds = float(get("scheduler", "tab_idle_seconds") or 900)
         self._resident_browser_count = int(
-            get("scheduler", "resident_browser_count") or 1
+            get("scheduler", "resident_browser_count", 1)
         )
 
     def reload_pool(
