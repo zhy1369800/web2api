@@ -37,6 +37,7 @@ from core.runtime.session_cache import SessionCache, SessionEntry
 from core.api.conv_parser import parse_conv_uuid_from_messages, session_id_suffix
 from core.api.react import format_react_prompt
 from core.api.schemas import OpenAIChatRequest, extract_user_content
+from core.hub.schemas import OpenAIStreamEvent
 
 logger = logging.getLogger(__name__)
 
@@ -606,20 +607,21 @@ class ChatHandler:
             full_history=True,
         )
 
-    async def stream_completion(
+    async def _stream_completion(
         self,
         type_name: str,
         req: OpenAIChatRequest,
     ) -> AsyncIterator[str]:
         """
-        流式返回助手回复；正文在前，会话 ID 的零宽编码附加在末尾。
+        内部实现：调度 + 插件 stream_completion 字符串流，末尾附加 session_id 零宽编码。
+        对外仅通过 stream_openai_events() 暴露事件流。
         """
         plugin = PluginRegistry.get(type_name)
         if plugin is None:
             raise ValueError(f"未注册的 type: {type_name}")
 
         raw_messages = _request_messages_as_dicts(req)
-        conv_uuid = parse_conv_uuid_from_messages(raw_messages)
+        conv_uuid = req.resume_session_id or parse_conv_uuid_from_messages(raw_messages)
         logger.info("[chat] type=%s parsed conv_uuid=%s", type_name, conv_uuid)
 
         has_tools = bool(req.tools)
@@ -655,6 +657,8 @@ class ChatHandler:
                     react_prompt_prefix=react_prompt_prefix,
                     full_history=target.full_history,
                 )
+                if not content.strip() and req.attachment_files:
+                    content = "Please analyze the attached image."
                 if not content.strip():
                     raise ValueError("messages 中需至少有一条带 content 的 user 消息")
 
@@ -713,6 +717,15 @@ class ChatHandler:
                     self._pool.account_id(target.group, target.account),
                     target.full_history,
                 )
+                # 根据是否 full_history 选择附件来源：
+                # - 复用会话（full_history=False）：仅最后一条 user 的图片（可能为空，则本轮不带图）
+                # - 新建/重建会话（full_history=True）：所有历史 user 的图片
+                attachments = (
+                    req.attachment_files_all_users
+                    if target.full_history
+                    else req.attachment_files_last_user
+                )
+
                 stream = cast(
                     AsyncIterator[str],
                     plugin.stream_completion(
@@ -721,6 +734,7 @@ class ChatHandler:
                         session_id,
                         content,
                         request_id=request_id,
+                        attachments=attachments,
                     ),
                 )
                 async for chunk in stream:
@@ -761,3 +775,17 @@ class ChatHandler:
                             self._busy_sessions.discard(active_session_id)
                         self._browser_manager.release_tab(target.proxy_key, type_name)
                         await self._reconcile_tabs_locked()
+
+    async def stream_openai_events(
+        self,
+        type_name: str,
+        req: OpenAIChatRequest,
+    ) -> AsyncIterator[OpenAIStreamEvent]:
+        """
+        唯一流式出口：以 OpenAIStreamEvent 为中间态。插件产出字符串流，
+        在此包装为 content_delta + finish，供协议适配层编码为各协议 SSE。
+        """
+        async for chunk in self._stream_completion(type_name, req):
+            # session marker 也作为 content_delta 透传（对事件消费者而言是普通文本片段）
+            yield OpenAIStreamEvent(type="content_delta", content=chunk)
+        yield OpenAIStreamEvent(type="finish", finish_reason="stop")

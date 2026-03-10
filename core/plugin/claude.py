@@ -12,9 +12,10 @@ from typing import Any
 
 from playwright.async_api import BrowserContext, Page
 
+from core.api.schemas import InputAttachment
 from core.constants import TIMEZONE
 from core.plugin.base import BaseSitePlugin, PluginRegistry, SiteConfig
-from core.plugin.helpers import request_json_via_page_fetch
+from core.plugin.helpers import request_json_via_page_fetch, upload_file_via_page_fetch
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +227,7 @@ class ClaudePlugin(BaseSitePlugin):
         message: str,
         session_id: str,
         state: dict[str, Any],
+        prepared_attachments: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         parent = state.get("parent_message_uuid")
         tz = state.get("timezone") or TIMEZONE
@@ -234,6 +236,8 @@ class ClaudePlugin(BaseSitePlugin):
         )
         if parent:
             body["parent_message_uuid"] = parent
+        if prepared_attachments:
+            body.update(prepared_attachments)
         return body
 
     # 解析 SSE 事件
@@ -271,6 +275,49 @@ class ClaudePlugin(BaseSitePlugin):
                 except Exception:
                     pass
         return int(time.time()) + 5 * 3600
+
+    async def prepare_attachments(
+        self,
+        context: BrowserContext,
+        page: Page,
+        session_id: str,
+        state: dict[str, Any],
+        attachments: list[InputAttachment],
+    ) -> dict[str, Any]:
+        del context
+        if not attachments:
+            return {}
+        if len(attachments) > 5:
+            raise RuntimeError("Claude 单次最多上传 5 张图片")
+
+        org_uuid = state["workspace"]["org_uuid"]
+        url = (
+            f"{self.api_base}/organizations/{org_uuid}/conversations/"
+            f"{session_id}/wiggle/upload-file"
+        )
+        file_ids: list[str] = []
+        for attachment in attachments:
+            resp = await upload_file_via_page_fetch(
+                page,
+                url,
+                filename=attachment.filename,
+                mime_type=attachment.mime_type,
+                data=attachment.data,
+                field_name="file",
+                timeout_ms=30000,
+            )
+            status = int(resp.get("status") or 0)
+            if status not in (200, 201):
+                text = str(resp.get("text") or "")[:500]
+                raise RuntimeError(f"图片上传失败 {status}: {text}")
+            data = resp.get("json")
+            if not isinstance(data, dict):
+                raise RuntimeError("图片上传返回非 JSON")
+            file_uuid = data.get("file_uuid") or data.get("uuid")
+            if not file_uuid:
+                raise RuntimeError("图片上传未返回 file_uuid")
+            file_ids.append(str(file_uuid))
+        return {"attachments": [], "files": file_ids}
 
 
 def register_claude_plugin() -> None:

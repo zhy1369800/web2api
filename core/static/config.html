@@ -266,23 +266,26 @@
     </style>
   </head>
   <body>
-    <h1>账号池配置</h1>
+    <h1>Account Pool Configuration</h1>
     <div id="msg"></div>
     <div class="toolbar">
-      <button type="button" class="btn btn-primary" id="addGroup">添加代理组</button>
-      <button type="button" class="btn btn-ghost" id="load">重新加载</button>
-      <button type="button" class="btn btn-primary" id="save">保存配置</button>
-      <button type="button" class="btn btn-ghost" id="logout">退出登录</button>
+      <button type="button" class="btn btn-primary" id="addGroup">Add Proxy Group</button>
+      <button type="button" class="btn btn-ghost" id="load">Reload</button>
+      <button type="button" class="btn btn-primary" id="save">Save Config</button>
+      <button type="button" class="btn btn-ghost" id="logout">Logout</button>
     </div>
     <div class="search-row">
-      <label>搜索（代理 host/user 或账号 name / type）</label>
-      <input type="text" id="search" placeholder="输入关键词筛选..." />
+      <label>Search (proxy host/user or account name/type)</label>
+      <input type="text" id="search" placeholder="Enter keyword to filter..." />
     </div>
     <div class="hint">
-      <strong>网络模式说明：</strong
-      >勾选“使用代理”表示浏览器通过代理出口访问；取消勾选表示直连，直接使用当前机器自身 IP。
+      <strong>Network mode:</strong>
+      勾选“使用代理”表示浏览器通过代理出口访问；取消勾选表示直连，直接使用当前机器自身 IP。
       直连模式下不要在同一个组里配置大量账号，否则站点很容易识别为“同一 IP
-      下多个账号”，导致风控甚至封 IP。
+      下多个账号”，导致风控甚至封 IP。<br />
+      When "Use proxy" is checked, the browser accesses the site via the proxy; when unchecked, it
+      uses this machine's own IP. Do NOT put many accounts in one direct-connection group, or the
+      site may treat them as multiple accounts under the same IP and trigger risk control or IP ban.
     </div>
     <div class="stats" id="stats"></div>
     <div id="list"></div>
@@ -439,7 +442,7 @@
               acc.name
             )}" placeholder="claude-01" /></div>
             <div class="f type"><label>type</label><select data-k="type">${selectOpts}</select></div>
-            <div class="actions"><button type="button" class="btn btn-danger btn-sm">删除</button></div>
+            <div class="actions"><button type="button" class="btn btn-danger btn-sm">Delete</button></div>
           </div>
           <div class="account-row2">
             <div class="f"><label>auth (JSON)</label><textarea data-k="auth" placeholder='{"sessionKey": "..."}' rows="2">${escapeAttr(
@@ -528,21 +531,21 @@
           <h2 class="group-header ${isCollapsed ? 'collapsed' : ''}" data-action="toggle">
             <span>
               <span class="chevron">▼</span>
-              <span class="label">代理组 ${groupIndex + 1}</span>
+              <span class="label">Proxy Group ${groupIndex + 1}</span>
               <span class="label" style="margin-left:8px;font-weight:400">${
-                useProxy ? group.proxy_host || '代理未填写' : '直连模式'
-              } · ${allAccounts.length} 个账号</span>
+                useProxy ? group.proxy_host || 'Proxy not set' : 'Direct connection'
+              } · ${allAccounts.length} accounts</span>
             </span>
             <span onclick="event.stopPropagation()">
-              <button type="button" class="btn btn-ghost btn-sm" data-action="add-account">添加账号</button>
-              <button type="button" class="btn btn-danger btn-sm" data-action="remove-group">删除本组</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-action="add-account">Add account</button>
+              <button type="button" class="btn btn-danger btn-sm" data-action="remove-group">Delete this group</button>
             </span>
           </h2>
           <div class="group-body">
             ${
               useProxy
                 ? ''
-                : `<div class="warn">当前为直连模式：浏览器直接使用这台机器的出口 IP。请勿在同一个直连组下堆很多账号，否则容易被识别为同一 IP 下多账号，导致账号关联或 IP 被封。</div>`
+                : `<div class="warn">当前为直连模式：浏览器直接使用这台机器的出口 IP。请勿在同一个直连组下堆很多账号，否则容易被识别为同一 IP 下多账号，导致账号关联或 IP 被封。<br />Current group is in direct-connection mode: the browser uses this machine's exit IP directly. Do NOT put many accounts in the same direct group, otherwise the site may link the accounts by IP and even block the IP.</div>`
             }
             <div class="row proxy-one-row">
               <div>
@@ -551,7 +554,7 @@
                   <input type="checkbox" data-k="use_proxy" ${
                     useProxy ? 'checked' : ''
                   } style="width:auto" />
-                  <span>使用代理</span>
+                  <span>Use proxy</span>
                 </label>
               </div>
               <div><label>proxy_host</label><input type="text" data-k="proxy_host" value="${escapeAttr(
@@ -559,10 +562,10 @@
               )}" placeholder="sg.arxlabs.io:3010" ${useProxy ? '' : 'disabled'} /></div>
               <div><label>proxy_user</label><input type="text" data-k="proxy_user" value="${escapeAttr(
                 key('proxy_user')
-              )}" placeholder="代理用户名" ${useProxy ? '' : 'disabled'} /></div>
+              )}" placeholder="Proxy username" ${useProxy ? '' : 'disabled'} /></div>
               <div><label>proxy_pass</label><input type="text" data-k="proxy_pass" value="${escapeAttr(
                 key('proxy_pass')
-              )}" placeholder="代理密码" ${useProxy ? '' : 'disabled'} /></div>
+              )}" placeholder="Proxy password" ${useProxy ? '' : 'disabled'} /></div>
               <div><label>fingerprint_id</label><input type="text" data-k="fingerprint_id" value="${escapeAttr(
                 key('fingerprint_id')
               )}" placeholder="4567" /></div>
@@ -580,7 +583,7 @@
               })()}</select></div>
             </div>
             <div class="accounts">
-              <h3>账号列表（name / type / auth JSON，如 claude 用 {"sessionKey": "xxx"}）</h3>
+              <h3>Accounts (name / type / auth JSON, e.g. {"sessionKey": "xxx"} for Claude)</h3>
               <div class="accounts-list"></div>
               ${
                 totalPages > 1
@@ -588,19 +591,21 @@
               <div class="pagination" style="margin-top:12px;display:flex;align-items:center;gap:12px;">
                 <span class="info" style="font-size:13px;color:var(--text-muted)">第 ${
                   currentPage + 1
-                } / ${totalPages} 页，共 ${totalCount} 条</span>
+                } / ${totalPages} pages, ${totalCount} accounts</span>
                 <select data-action="page-size">
                   ${PAGE_SIZE_OPTIONS.map(
                     (n) =>
-                      `<option value="${n}" ${n === pageSize ? 'selected' : ''}>${n} 条/页</option>`
+                      `<option value="${n}" ${
+                        n === pageSize ? 'selected' : ''
+                      }>${n} accounts/page</option>`
                   ).join('')}
                 </select>
                 <button type="button" class="btn btn-ghost btn-sm" data-action="prev" ${
                   currentPage <= 0 ? 'disabled' : ''
-                }>上一页</button>
+                }>Previous page</button>
                 <button type="button" class="btn btn-ghost btn-sm" data-action="next" ${
                   currentPage >= totalPages - 1 ? 'disabled' : ''
-                }>下一页</button>
+                }>Next page</button>
               </div>
               `
                   : ''
@@ -704,8 +709,8 @@
         const statsEl = document.getElementById('stats')
         if (statsEl) {
           statsEl.textContent = searchText.trim()
-            ? `共 ${totalGroups} 个代理组、${totalAccounts} 个账号（当前筛选 ${filtered.length} 组）`
-            : `共 ${totalGroups} 个代理组、${totalAccounts} 个账号`
+            ? `Total ${totalGroups} groups, ${totalAccounts} accounts (filtered ${filtered.length} groups)`
+            : `Total ${totalGroups} groups, ${totalAccounts} accounts`
         }
 
         function rerender() {
@@ -770,16 +775,19 @@
           await loadTypes()
           const data = await loadConfig()
           render(data)
-          showMsg('已加载')
+          showMsg('已加载 / Loaded')
         } catch (e) {
-          showMsg('加载失败: ' + e.message, 'error')
+          showMsg('加载失败 / Load failed: ' + e.message, 'error')
         }
       }
 
       document.getElementById('save').onclick = async () => {
         const toSave = getConfigFromForm()
         if (!toSave.length) {
-          showMsg('请至少保留一个代理组且每组至少一个账号', 'error')
+          showMsg(
+            '请至少保留一个代理组且每组至少一个账号 / Please keep at least one proxy group and at least one account in each group',
+            'error'
+          )
           return
         }
         try {
@@ -790,11 +798,11 @@
           })
           const text = await res.text()
           if (!res.ok) throw new Error(text || res.statusText)
-          showMsg('保存成功并已生效')
+          showMsg('保存成功并已生效 / Saved successfully and applied')
           const cfg = await loadConfig()
           render(cfg)
         } catch (e) {
-          showMsg('保存失败: ' + e.message, 'error')
+          showMsg('保存失败 / Save failed: ' + e.message, 'error')
         }
       }
       document.getElementById('logout').onclick = async () => {
@@ -816,7 +824,10 @@
           render(data)
         } catch (e) {
           render([])
-          showMsg('未加载到配置，可新建后保存', 'error')
+          showMsg(
+            '未加载到配置，可新建后保存 / No config loaded, you can create a new one and save it',
+            'error'
+          )
         }
       })()
     </script>

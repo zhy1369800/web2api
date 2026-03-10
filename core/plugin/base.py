@@ -16,6 +16,7 @@ from typing import Any, AsyncIterator
 
 from playwright.async_api import BrowserContext, Page
 
+from core.api.schemas import InputAttachment
 from core.config.settings import get
 from core.plugin.errors import AccountFrozenError  # noqa: F401  — re-export for backward compat
 from core.plugin.helpers import (
@@ -238,7 +239,20 @@ class BaseSitePlugin(AbstractPlugin):
             raise RuntimeError(f"未知会话 ID: {session_id}")
 
         url = self.build_completion_url(session_id, state)
-        body = self.build_completion_body(message, session_id, state)
+        attachments = list(kwargs.get("attachments") or [])
+        prepared_attachments = await self.prepare_attachments(
+            context,
+            page,
+            session_id,
+            state,
+            attachments,
+        )
+        body = self.build_completion_body(
+            message,
+            session_id,
+            state,
+            prepared_attachments,
+        )
         body_json = json.dumps(body)
         chat_page_url = self.build_chat_page_url(session_id, state)
         request_id: str = kwargs.get("request_id", "")
@@ -298,6 +312,7 @@ class BaseSitePlugin(AbstractPlugin):
         message: str,
         session_id: str,
         state: dict[str, Any],
+        prepared_attachments: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """构建补全请求体，返回 dict（基类负责 json.dumps）。"""
         ...
@@ -344,6 +359,17 @@ class BaseSitePlugin(AbstractPlugin):
                 self.type_name,
                 last_uuid,
             )
+
+    async def prepare_attachments(
+        self,
+        context: BrowserContext,
+        page: Page,
+        session_id: str,
+        state: dict[str, Any],
+        attachments: list[InputAttachment],
+    ) -> dict[str, Any]:
+        del context, page, session_id, state, attachments
+        return {}
 
 
 # ---------------------------------------------------------------------------

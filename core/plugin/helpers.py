@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import base64
 import json
 import logging
 from collections.abc import Callable
@@ -94,6 +95,52 @@ async ({ url, method, body, headers, timeoutMs }) => {
   } catch (e) {
     clearTimeout(t);
     const msg = e.name === "AbortError" ? `请求超时(${Math.floor((timeoutMs || 15000) / 1000)}s)` : (e.message || String(e));
+    return { error: msg };
+  }
+}
+"""
+
+
+PAGE_FETCH_MULTIPART_JS = """
+async ({ url, filename, mimeType, dataBase64, fieldName, extraFields, timeoutMs }) => {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs || 30000);
+  try {
+    const binary = atob(dataBase64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    const form = new FormData();
+    if (extraFields) {
+      Object.entries(extraFields).forEach(([k, v]) => {
+        if (v !== undefined && v !== null) form.append(k, String(v));
+      });
+    }
+    const file = new File([bytes], filename, { type: mimeType || "application/octet-stream" });
+    form.append(fieldName || "file", file);
+    const resp = await fetch(url, {
+      method: "POST",
+      body: form,
+      credentials: "include",
+      signal: ctrl.signal
+    });
+    clearTimeout(t);
+    const text = await resp.text();
+    const headersObj = {};
+    resp.headers.forEach((v, k) => { headersObj[k] = v; });
+    return {
+      ok: resp.ok,
+      status: resp.status,
+      statusText: resp.statusText,
+      url: resp.url,
+      redirected: resp.redirected,
+      headers: headersObj,
+      text,
+    };
+  } catch (e) {
+    clearTimeout(t);
+    const msg = e.name === "AbortError" ? `请求超时(${Math.floor((timeoutMs || 30000) / 1000)}s)` : (e.message || String(e));
     return { error: msg };
   }
 }
@@ -237,6 +284,52 @@ async def request_json_via_page_fetch(
     return result
 
 
+async def upload_file_via_page_fetch(
+    page: Page,
+    url: str,
+    *,
+    filename: str,
+    mime_type: str,
+    data: bytes,
+    field_name: str = "file",
+    extra_fields: dict[str, str] | None = None,
+    timeout_ms: int = 30000,
+) -> dict[str, Any]:
+    logger.info(
+        "[fetch] page upload filename=%s mime=%s url=%s page.url=%s",
+        filename,
+        mime_type,
+        url[:120] + "..." if len(url) > 120 else url,
+        page.url or "",
+    )
+    result = await page.evaluate(
+        PAGE_FETCH_MULTIPART_JS,
+        {
+            "url": url,
+            "filename": filename,
+            "mimeType": mime_type,
+            "dataBase64": base64.b64encode(data).decode("ascii"),
+            "fieldName": field_name,
+            "extraFields": extra_fields or {},
+            "timeoutMs": timeout_ms,
+        },
+    )
+    if not isinstance(result, dict):
+        raise RuntimeError("页面上传返回结果异常")
+    error = result.get("error")
+    if error:
+        raise RuntimeError(str(error))
+    text = result.get("text")
+    if isinstance(text, str) and text:
+        try:
+            result["json"] = json.loads(text)
+        except json.JSONDecodeError:
+            result["json"] = None
+    else:
+        result["json"] = None
+    return result
+
+
 async def stream_raw_via_page_fetch(
     context: BrowserContext,
     page: Page,
@@ -321,7 +414,9 @@ async def stream_raw_via_page_fetch(
                             msg,
                         )
                         continue
-                    logger.warning("[fetch] __error__ from page before terminal event: %s", msg)
+                    logger.warning(
+                        "[fetch] __error__ from page before terminal event: %s", msg
+                    )
                     raise RuntimeError(msg)
                     continue
                 yield chunk

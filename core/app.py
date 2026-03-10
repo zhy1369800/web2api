@@ -20,6 +20,7 @@ from core.api.auth import (
     config_login_enabled,
     ensure_config_secret_hashed,
 )
+from core.api.anthropic_routes import create_anthropic_router
 from core.api.chat_handler import ChatHandler
 from core.api.config_routes import create_config_router
 from core.api.routes import create_router
@@ -127,6 +128,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(create_router())
+    app.include_router(create_anthropic_router())
     app.include_router(create_config_router())
     return app
 
