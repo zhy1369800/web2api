@@ -40,8 +40,8 @@ docker compose up -d --build
 
 ```bash
 mkdir web2api && cd web2api
-mkdir -p docker-data && curl -sL -o docker-data/config.yaml https://raw.githubusercontent.com/caiwuu/web2api/master/config.yaml
-# 修改 config.yaml
+mkdir -p docker-data && curl -sL -o docker-data/config.yaml https://raw.githubusercontent.com/caiwuu/web2api/master/docker/config.container.yaml
+# 修改 docker-data/config.yaml
 docker run -d --name web2api --restart unless-stopped --platform linux/amd64 --shm-size=1g \
   -p 9000:9000 -v "$(pwd)/docker-data:/data" ghcr.io/caiwuu/web2api:latest
 ```
