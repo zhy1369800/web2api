@@ -9,7 +9,6 @@
 
 import json
 import logging
-import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
@@ -26,10 +25,6 @@ from core.plugin.helpers import (
 )
 
 logger = logging.getLogger(__name__)
-
-_UUID_RE = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-)
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +62,9 @@ class AbstractPlugin(ABC):
 
     type_name: str
 
-    async def create_page(self, context: BrowserContext) -> Page:
+    async def create_page(
+        self, context: BrowserContext, reuse_page: Page | None = None
+    ) -> Page:
         raise NotImplementedError
 
     async def apply_auth(
@@ -104,8 +101,8 @@ class AbstractPlugin(ABC):
     def parse_session_id(self, messages: list[dict[str, Any]]) -> str | None:
         return None
 
-    def is_terminal_sse_event(self, payload: str) -> bool:
-        """判断某条 SSE payload 是否表示本轮响应已正常结束。默认不识别。"""
+    def is_stream_end_event(self, payload: str) -> bool:
+        """判断某条流式 payload 是否表示本轮响应已正常结束。默认不识别。"""
         return False
 
     def has_session(self, session_id: str) -> bool:
@@ -137,10 +134,10 @@ class BaseSitePlugin(AbstractPlugin):
 
     插件开发者继承此类后，只需：
       1. 声明 site = SiteConfig(...)        — 站点配置
-      2. 实现 fetch_workspace()             — 获取 org/workspace 信息
+      2. 实现 fetch_site_context()           — 获取站点上下文（如 org/user 信息）
       3. 实现 create_session()              — 调用站点 API 创建会话
       4. 实现 build_completion_url/body()    — 拼补全请求的 URL 与 body
-      5. 实现 parse_sse_event()             — 解析单条 SSE data
+      5. 实现 parse_stream_event()          — 解析单条流式事件（如 SSE data）
 
     create_page / apply_auth / create_conversation / stream_completion
     均由基类自动编排，无需重写。
@@ -176,8 +173,14 @@ class BaseSitePlugin(AbstractPlugin):
 
     # ---- 基类全自动实现，子类无需碰 ----
 
-    async def create_page(self, context: BrowserContext) -> Page:
-        return await create_page_for_site(context, self.start_url)
+    async def create_page(
+        self,
+        context: BrowserContext,
+        reuse_page: Page | None = None,
+    ) -> Page:
+        return await create_page_for_site(
+            context, self.start_url, reuse_page=reuse_page
+        )
 
     async def apply_auth(
         self,
@@ -186,7 +189,6 @@ class BaseSitePlugin(AbstractPlugin):
         auth: dict[str, Any],
         *,
         reload: bool = True,
-        **kwargs: Any,
     ) -> None:
         await apply_cookie_auth(
             context,
@@ -204,19 +206,20 @@ class BaseSitePlugin(AbstractPlugin):
         page: Page,
         **kwargs: Any,
     ) -> str | None:
-        workspace = await self.fetch_workspace(context, page)
-        if workspace is None:
+        # 调用子类获取站点上下文
+        site_context = await self.fetch_site_context(context, page)
+        if site_context is None:
             logger.warning(
-                "[%s] fetch_workspace 返回 None，请确认已登录", self.type_name
+                "[%s] fetch_site_context 返回 None，请确认已登录", self.type_name
             )
             return None
-        conv_id = await self.create_session(context, page, workspace)
+        # 通过站点上下文创建会话
+        conv_id = await self.create_session(context, page, site_context)
         if conv_id is None:
             return None
-        state: dict[str, Any] = {"workspace": workspace}
+        state: dict[str, Any] = {"site_context": site_context}
         if kwargs.get("timezone") is not None:
             state["timezone"] = kwargs["timezone"]
-        self.init_session_state(state, workspace)
         self._session_state[conv_id] = state
         logger.info(
             "[%s] create_conversation done conv_id=%s sessions=%s",
@@ -254,7 +257,6 @@ class BaseSitePlugin(AbstractPlugin):
             prepared_attachments,
         )
         body_json = json.dumps(body)
-        chat_page_url = self.build_chat_page_url(session_id, state)
         request_id: str = kwargs.get("request_id", "")
 
         logger.info(
@@ -270,25 +272,24 @@ class BaseSitePlugin(AbstractPlugin):
             page,
             url,
             body_json,
-            self.parse_sse_event,
+            self.parse_stream_event,
             request_id,
-            chat_page_url=chat_page_url,
             on_http_error=self.on_http_error,
-            is_terminal_event=self.is_terminal_sse_event,
+            is_terminal_event=self.is_stream_end_event,
             collect_message_id=out_message_ids,
         ):
             yield text
 
         if out_message_ids and session_id in self._session_state:
-            self.update_session_state(session_id, out_message_ids)
+            self.on_stream_completion_finished(session_id, out_message_ids)
 
     # ---- 子类必须实现的 hook ----
 
     @abstractmethod
-    async def fetch_workspace(
+    async def fetch_site_context(
         self, context: BrowserContext, page: Page
     ) -> dict[str, Any] | None:
-        """获取 workspace / org 信息（如 org_uuid），失败返回 None。"""
+        """获取站点上下文信息（如 org_uuid、user_id 等），失败返回 None。"""
         ...
 
     @abstractmethod
@@ -296,7 +297,7 @@ class BaseSitePlugin(AbstractPlugin):
         self,
         context: BrowserContext,
         page: Page,
-        workspace: dict[str, Any],
+        site_context: dict[str, Any],
     ) -> str | None:
         """调用站点 API 创建会话，返回会话 ID，失败返回 None。"""
         ...
@@ -318,47 +319,24 @@ class BaseSitePlugin(AbstractPlugin):
         ...
 
     @abstractmethod
-    def parse_sse_event(
+    def parse_stream_event(
         self,
         payload: str,
     ) -> tuple[list[str], str | None, str | None]:
         """
-        解析单条 SSE data payload。
+        解析单条流式事件 payload（如 SSE data 行）。
         返回 (texts, message_id, error_message)。
         """
         ...
 
     # ---- 子类可选覆盖的 hook（有合理默认值） ----
 
-    def build_chat_page_url(
-        self,
-        session_id: str,
-        state: dict[str, Any],
-    ) -> str | None:
-        """补全时跳转的页面 URL，默认 {start_url}/chat/{session_id}。"""
-        return f"{self.start_url.rstrip('/')}/chat/{session_id}"
-
-    def init_session_state(
-        self,
-        state: dict[str, Any],
-        workspace: dict[str, Any],
-    ) -> None:
-        """会话创建后初始化额外 state 字段，默认空。"""
-
-    def update_session_state(
+    def on_stream_completion_finished(
         self,
         session_id: str,
         message_ids: list[str],
     ) -> None:
-        """流式完成后更新 state，默认把最后一个 UUID 存为 parent_message_uuid。"""
-        last_uuid = next((m for m in reversed(message_ids) if _UUID_RE.match(m)), None)
-        if last_uuid:
-            self._session_state[session_id]["parent_message_uuid"] = last_uuid
-            logger.info(
-                "[%s] updated parent_message_uuid=%s",
-                self.type_name,
-                last_uuid,
-            )
+        """Hook：流式补全结束后调用，子类可按需用 message_ids 更新会话 state（如记续写用的父消息 id）。"""
 
     async def prepare_attachments(
         self,

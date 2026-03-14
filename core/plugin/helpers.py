@@ -171,14 +171,81 @@ async def create_page_for_site(
     context: BrowserContext,
     start_url: str,
     *,
+    reuse_page: Page | None = None,
     timeout: int = 20000,
 ) -> Page:
     """
-    总是新建一个 page 并 goto start_url，用于 page 池的初始化与补回。
+    若传入 reuse_page 则在其上 goto start_url，否则 new_page 再 goto。
+    用于复用浏览器默认空白页或 page 池的初始化与补回。
     """
+    if reuse_page is not None:
+        await reuse_page.goto(start_url, wait_until="domcontentloaded", timeout=timeout)
+        return reuse_page
     page = await context.new_page()
     await page.goto(start_url, wait_until="domcontentloaded", timeout=timeout)
     return page
+
+
+def _cookie_domain_matches(cookie_domain: str, site_domain: str) -> bool:
+    """判断 cookie 的 domain 是否属于站点 domain（如 .claude.ai 与 claude.ai 视为同一域）。"""
+    a = cookie_domain if cookie_domain.startswith(".") else f".{cookie_domain}"
+    b = site_domain if site_domain.startswith(".") else f".{site_domain}"
+    return a == b
+
+
+def _cookie_to_set_param(c: Any) -> dict[str, str]:
+    """将 context.cookies() 返回的项转为 add_cookies 接受的 SetCookieParam 格式。"""
+    return {
+        "name": c["name"],
+        "value": c["value"],
+        "domain": c.get("domain") or "",
+        "path": c.get("path") or "/",
+    }
+
+
+async def clear_cookies_for_domain(
+    context: BrowserContext,
+    site_domain: str,
+) -> None:
+    """清除 context 内属于指定站点域的所有 cookie，保留其他域。"""
+    cookies = await context.cookies()
+    keep = [
+        c
+        for c in cookies
+        if not _cookie_domain_matches(c.get("domain", ""), site_domain)
+    ]
+    await context.clear_cookies()
+    if keep:
+        await context.add_cookies([_cookie_to_set_param(c) for c in keep])  # type: ignore[arg-type]
+    logger.info(
+        "[auth] cleared cookies for domain=%s (kept %s cookies)", site_domain, len(keep)
+    )
+
+
+async def clear_page_storage_for_switch(page: Page) -> None:
+    """切号前清空当前页面的 localStorage（当前 origin）。"""
+    try:
+        await page.evaluate("() => { window.localStorage.clear(); }")
+        logger.info("[auth] cleared localStorage for switch")
+    except Exception as e:
+        logger.warning("[auth] clear localStorage failed (page may be detached): %s", e)
+
+
+async def safe_page_reload(page: Page, url: str | None = None) -> None:
+    """安全地 reload 或 goto(url)，忽略因 ERR_ABORTED / frame detached 导致的异常。"""
+    try:
+        if url:
+            await page.goto(url, wait_until="domcontentloaded")
+        else:
+            await page.reload(wait_until="domcontentloaded")
+    except Exception as e:
+        err_msg = str(e)
+        if "ERR_ABORTED" in err_msg or "detached" in err_msg.lower():
+            logger.warning(
+                "[auth] page.reload/goto 被中止或 frame 已分离: %s", err_msg[:200]
+            )
+        else:
+            raise
 
 
 async def apply_cookie_auth(
@@ -206,6 +273,7 @@ async def apply_cookie_auth(
                 break
     if not value:
         raise ValueError(f"auth 需包含以下其一且非空: {auth_keys}")
+
     logger.info(
         "[auth] context.add_cookies domain=%s name=%s reload=%s page.url=%s",
         domain,
@@ -226,17 +294,7 @@ async def apply_cookie_auth(
         ]
     )
     if reload:
-        try:
-            await page.reload(wait_until="domcontentloaded")
-        except Exception as e:
-            err_msg = str(e)
-            if "ERR_ABORTED" in err_msg or "detached" in err_msg.lower():
-                logger.warning(
-                    "[auth] page.reload 被中止或 frame 已分离，跳过（cookie 已写入 context）: %s",
-                    err_msg[:200],
-                )
-            else:
-                raise
+        await safe_page_reload(page)
 
 
 async def request_json_via_page_fetch(
@@ -336,7 +394,6 @@ async def stream_raw_via_page_fetch(
     url: str,
     body: str,
     request_id: str,
-    chat_page_url: str | None = None,
     *,
     on_http_error: Callable[[str, dict[str, str] | None], int | None] | None = None,
     on_headers: Callable[[dict[str, str]], None] | None = None,
@@ -465,7 +522,6 @@ async def stream_completion_via_sse(
     parse_event: ParseSseEvent,
     request_id: str,
     *,
-    chat_page_url: str | None = None,
     on_http_error: Callable,
     is_terminal_event: Callable[[str], bool] | None = None,
     collect_message_id: list[str] | None = None,
@@ -483,7 +539,6 @@ async def stream_completion_via_sse(
         url,
         body,
         request_id,
-        chat_page_url=chat_page_url,
         on_http_error=on_http_error,
         error_state=stream_state,
     ):
@@ -494,7 +549,7 @@ async def stream_completion_via_sse(
             try:
                 texts, message_id, error = parse_event(payload)
             except Exception as e:
-                logger.debug("parse_sse_event 单条解析异常: %s", e)
+                logger.debug("parse_stream_event 单条解析异常: %s", e)
                 continue
             if error:
                 logger.debug("SSE error: %s", error)

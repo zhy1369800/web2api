@@ -29,7 +29,8 @@ from core.config.repository import ConfigRepository
 from core.config.schema import AccountConfig, ProxyGroupConfig
 from core.config.settings import get
 from core.constants import TIMEZONE
-from core.plugin.base import AccountFrozenError, PluginRegistry
+from core.plugin.base import AccountFrozenError, BaseSitePlugin, PluginRegistry
+from core.plugin.helpers import clear_cookies_for_domain
 from core.runtime.browser_manager import BrowserManager, ClosedTabInfo, TabRuntime
 from core.runtime.keys import ProxyKey
 from core.runtime.session_cache import SessionCache, SessionEntry
@@ -237,6 +238,21 @@ class ChatHandler:
             if plugin is not None:
                 plugin.drop_sessions(info.session_ids)
 
+    async def _clear_tab_domain_cookies_if_supported(
+        self, proxy_key: ProxyKey, type_name: str
+    ) -> None:
+        """关 tab 前清该 type 对应域名的 cookie（仅支持带 site.cookie_domain 的插件）。"""
+        entry = self._browser_manager.get_browser_entry(proxy_key)
+        if entry is None:
+            return
+        plugin = PluginRegistry.get(type_name)
+        if not isinstance(plugin, BaseSitePlugin) or not getattr(plugin, "site", None):
+            return
+        try:
+            await clear_cookies_for_domain(entry.context, plugin.site.cookie_domain)
+        except Exception as e:
+            logger.debug("关 tab 前清 cookie 失败 type=%s: %s", type_name, e)
+
     async def _prune_invalid_resources_locked(self) -> None:
         """关闭配置中已不存在的浏览器/tab，避免热更新后继续使用失效资源。"""
         for proxy_key, entry in list(self._browser_manager.list_browser_entries()):
@@ -257,11 +273,38 @@ class ChatHandler:
                 ):
                     self._invalidate_tab_sessions_locked(proxy_key, type_name)
                     if tab.active_requests == 0:
-                        closed = await self._browser_manager.close_tab(
-                            proxy_key, type_name
-                        )
-                        if closed is not None:
-                            self._apply_closed_tabs_locked([closed])
+                        # 与 reconcile 一致：优先同组同一页 re-auth，失败或无可用账号再关 tab
+                        switched = False
+                        group = self._pool.get_group_by_proxy_key(proxy_key)
+                        if group is not None:
+                            next_account = self._pool.next_available_account_in_group(
+                                group,
+                                type_name,
+                                exclude_account_ids={tab.account_id},
+                            )
+                            if next_account is not None:
+                                plugin = PluginRegistry.get(type_name)
+                                if plugin is not None:
+                                    switched = (
+                                        await self._browser_manager.switch_tab_account(
+                                            proxy_key,
+                                            type_name,
+                                            self._pool.account_id(group, next_account),
+                                            self._make_apply_auth_fn(
+                                                plugin,
+                                                next_account,
+                                            ),
+                                        )
+                                    )
+                        if not switched:
+                            await self._clear_tab_domain_cookies_if_supported(
+                                proxy_key, type_name
+                            )
+                            closed = await self._browser_manager.close_tab(
+                                proxy_key, type_name
+                            )
+                            if closed is not None:
+                                self._apply_closed_tabs_locked([closed])
                     else:
                         self._browser_manager.mark_tab_draining(proxy_key, type_name)
 
@@ -341,6 +384,9 @@ class ChatHandler:
 
                 group = self._pool.get_group_by_proxy_key(proxy_key)
                 if group is None:
+                    await self._clear_tab_domain_cookies_if_supported(
+                        proxy_key, type_name
+                    )
                     closed = await self._browser_manager.close_tab(proxy_key, type_name)
                     if closed is not None:
                         self._apply_closed_tabs_locked([closed])
@@ -365,6 +411,7 @@ class ChatHandler:
                     if switched:
                         continue
 
+                await self._clear_tab_domain_cookies_if_supported(proxy_key, type_name)
                 closed = await self._browser_manager.close_tab(proxy_key, type_name)
                 if closed is not None:
                     self._apply_closed_tabs_locked([closed])

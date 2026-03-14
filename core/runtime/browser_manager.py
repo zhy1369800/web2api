@@ -31,7 +31,7 @@ from core.runtime.keys import ProxyKey
 
 logger = logging.getLogger(__name__)
 
-CreatePageFn = Callable[[BrowserContext], Coroutine[Any, Any, Page]]
+CreatePageFn = Callable[[BrowserContext, Page | None], Coroutine[Any, Any, Page]]
 ApplyAuthFn = Callable[[BrowserContext, Page], Coroutine[Any, Any, None]]
 
 
@@ -412,7 +412,11 @@ class BrowserManager:
         if existing is not None:
             return existing
 
-        page = await create_page_fn(context)
+        # 首个 tab 时复用 Chromium 默认空白页，避免多一个无用标签
+        reuse_page = (
+            context.pages[0] if (len(entry.tabs) == 0 and context.pages) else None
+        )
+        page = await create_page_fn(context, reuse_page)
         try:
             await apply_auth_fn(context, page)
         except Exception:
