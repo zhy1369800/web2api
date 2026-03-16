@@ -30,7 +30,7 @@ Cursor (OpenAI 格式)  ←→  Function Call 层  ←→  Claude 网页版 (纯
 | `core/api/function_call.py` | parse_tool_calls、format_tools_for_prompt、detect_tool_call_mode、build_tool_calls_response |
 | `core/api/schemas.py`       | OpenAIMessage（tool_calls, tool_call_id）、extract_user_content                             |
 | `core/api/chat_handler.py`  | 将 tools 转文本，拼入 prompt 后发给插件                                                     |
-| `core/api/routes.py`        | 流式/非流式中解析 `<tool_call>`，转成 OpenAI 响应                                           |
+| `core/api/openai_routes.py` | 流式/非流式中解析 `<tool_call>`，转成 OpenAI 响应                                           |
 
 ---
 

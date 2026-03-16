@@ -12,13 +12,16 @@ from core.api.schemas import (
     OpenAIMessage,
 )
 from core.protocol.images import (
-    MAX_IMAGE_COUNT,
     download_remote_image,
     parse_base64_image,
     parse_data_url,
 )
 from core.hub.schemas import OpenAIStreamEvent
-from core.protocol.schemas import CanonicalChatRequest, CanonicalContentBlock
+from core.protocol.schemas import (
+    CanonicalChatRequest,
+    CanonicalContentBlock,
+    CanonicalMessage,
+)
 
 
 class CanonicalChatService:
@@ -113,9 +116,6 @@ class CanonicalChatService:
             last_user_blocks = [
                 block for block in last_user.content if block.type == "image"
             ]
-
-        if len(all_image_blocks) > MAX_IMAGE_COUNT:
-            raise ValueError(f"单次最多上传 {MAX_IMAGE_COUNT} 张图片")
 
         async def _prepare(
             blocks: list[CanonicalContentBlock],

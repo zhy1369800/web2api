@@ -21,9 +21,10 @@ from core.api.auth import (
     ensure_config_secret_hashed,
 )
 from core.api.anthropic_routes import create_anthropic_router
-from core.api.chat_handler import ChatHandler
+from core.api.openai_routes import create_openai_router
 from core.api.config_routes import create_config_router
-from core.api.routes import create_router
+
+from core.api.chat_handler import ChatHandler
 from core.config.repository import ConfigRepository
 from core.config.settings import get, get_bool
 from core.constants import CDP_PORT_RANGE, CHROMIUM_BIN
@@ -137,7 +138,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.include_router(create_router())
+    app.include_router(create_openai_router())
     app.include_router(create_anthropic_router())
     app.include_router(create_config_router())
     return app

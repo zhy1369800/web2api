@@ -14,23 +14,15 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-
 from core.api.auth import require_api_key
 from core.api.chat_handler import ChatHandler
+from core.api.deps import get_chat_handler
 from core.plugin.base import PluginRegistry
 from core.protocol.openai import OpenAIProtocolAdapter
 from core.protocol.service import CanonicalChatService
 
 
-def get_chat_handler(request: Request) -> ChatHandler:
-    """从 app state 取出 ChatHandler。"""
-    handler = getattr(request.app.state, "chat_handler", None)
-    if handler is None:
-        raise HTTPException(status_code=503, detail="服务未就绪")
-    return handler
-
-
-def create_router() -> APIRouter:
+def create_openai_router() -> APIRouter:
     """创建 OpenAI 协议路由。"""
     router = APIRouter(dependencies=[Depends(require_api_key)])
     adapter = OpenAIProtocolAdapter()
@@ -65,10 +57,6 @@ def create_router() -> APIRouter:
 
     @router.get("/openai/{provider}/v1/models")
     def list_models(provider: str) -> dict[str, Any]:
-        return _list_models(provider)
-
-    @router.get("/{provider}/v1/models")
-    def list_models_legacy(provider: str) -> dict[str, Any]:
         return _list_models(provider)
 
     async def _chat_completions(
@@ -117,14 +105,6 @@ def create_router() -> APIRouter:
 
     @router.post("/openai/{provider}/v1/chat/completions")
     async def chat_completions(
-        provider: str,
-        request: Request,
-        handler: ChatHandler = Depends(get_chat_handler),
-    ) -> Any:
-        return await _chat_completions(provider, request, handler)
-
-    @router.post("/{provider}/v1/chat/completions")
-    async def chat_completions_legacy(
         provider: str,
         request: Request,
         handler: ChatHandler = Depends(get_chat_handler),

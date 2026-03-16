@@ -7,7 +7,7 @@ import re
 import time
 import uuid as uuid_mod
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal, cast
 
 from core.api.conv_parser import (
     extract_session_id_marker,
@@ -51,7 +51,14 @@ class OpenAIProtocolAdapter(ProtocolAdapter):
             if msg.role == "system":
                 system_blocks.extend(blocks)
             else:
-                messages.append(CanonicalMessage(role=msg.role, content=blocks))
+                messages.append(
+                    CanonicalMessage(
+                        role=cast(
+                            Literal["system", "user", "assistant", "tool"], msg.role
+                        ),
+                        content=blocks,
+                    )
+                )
         tools = [self._to_tool_spec(tool) for tool in list(req.tools or [])]
         return CanonicalChatRequest(
             protocol="openai",
@@ -163,8 +170,10 @@ class OpenAIProtocolAdapter(ProtocolAdapter):
     def _message_to_raw_dict(msg: OpenAIMessage) -> dict[str, Any]:
         if isinstance(msg.content, list):
             content: str | list[dict[str, Any]] = [p.model_dump() for p in msg.content]
-        else:
+        elif isinstance(msg.content, str):
             content = msg.content
+        else:
+            content = ""
         out: dict[str, Any] = {"role": msg.role, "content": content}
         if msg.tool_calls is not None:
             out["tool_calls"] = msg.tool_calls
@@ -206,13 +215,16 @@ class OpenAIProtocolAdapter(ProtocolAdapter):
 
     @staticmethod
     def _to_tool_spec(tool: dict[str, Any]) -> CanonicalToolSpec:
-        function = tool.get("function") if tool.get("type") == "function" else tool
+        function_obj = tool.get("function") if tool.get("type") == "function" else tool
+        function: dict[str, Any] = (
+            function_obj if isinstance(function_obj, dict) else {}
+        )
         return CanonicalToolSpec(
             name=str(function.get("name") or ""),
             description=str(function.get("description") or ""),
-            input_schema=function.get("parameters")
-            or function.get("input_schema")
-            or {},
+            input_schema=(
+                function.get("parameters") or function.get("input_schema") or {}
+            ),
             strict=bool(function.get("strict") or False),
         )
 

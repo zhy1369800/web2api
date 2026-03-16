@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from core.api.auth import require_api_key
 from core.api.chat_handler import ChatHandler
-from core.api.routes import get_chat_handler
+from core.api.deps import get_chat_handler
 from core.protocol.anthropic import AnthropicProtocolAdapter
 from core.protocol.service import CanonicalChatService
 

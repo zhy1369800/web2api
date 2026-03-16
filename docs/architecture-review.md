@@ -60,7 +60,7 @@ class CanonicalChatRequest(BaseModel):
 
 ### 2.3 路由与协议适配器需手写并手动挂载
 
-**位置**：`core/app.py`、`core/api/routes.py`、`core/api/anthropic_routes.py`
+**位置**：`core/app.py`、`core/api/openai_routes.py`、`core/api/anthropic_routes.py`
 
 - 每种协议：单独一个 router 文件、手动 `create_*_router()`、在 `app.py` 里 `include_router(...)`。
 - 没有“协议注册表”或“根据注册表自动挂路由”的机制。

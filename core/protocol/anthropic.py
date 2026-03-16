@@ -6,7 +6,7 @@ import json
 import time
 import uuid as uuid_mod
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal, cast
 
 from core.api.conv_parser import (
     decode_latest_session_id,
@@ -51,7 +51,10 @@ class AnthropicProtocolAdapter(ProtocolAdapter):
                     block.text = strip_session_id_suffix(text)
             canonical_messages.append(
                 CanonicalMessage(
-                    role=str(item.get("role") or "user"),
+                    role=cast(
+                        Literal["system", "user", "assistant", "tool"],
+                        str(item.get("role") or "user"),
+                    ),
                     content=blocks,
                 )
             )
