@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 import uuid as uuid_mod
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal, cast
 
 from core.api.conv_parser import (
     extract_session_id_marker,
@@ -15,13 +14,9 @@ from core.api.conv_parser import (
     strip_session_id_suffix,
 )
 from core.api.function_call import build_tool_calls_response
-from core.api.react import (
-    format_react_final_answer_content,
-    parse_react_output,
-    react_output_to_tool_calls,
-)
-from core.api.react_stream_parser import ReactStreamParser
 from core.api.schemas import OpenAIChatRequest, OpenAIContentPart, OpenAIMessage
+from core.api.tagged_output import format_openai_tagged_answer, parse_tagged_output
+from core.api.tagged_stream_parser import TaggedStreamEvent, TaggedStreamParser
 from core.hub.schemas import OpenAIStreamEvent
 from core.protocol.base import ProtocolAdapter
 from core.protocol.schemas import (
@@ -47,11 +42,18 @@ class OpenAIProtocolAdapter(ProtocolAdapter):
         system_blocks: list[CanonicalContentBlock] = []
         messages: list[CanonicalMessage] = []
         for msg in req.messages:
-            blocks = self._to_blocks(msg.content)
+            blocks = self._message_to_blocks(msg)
             if msg.role == "system":
                 system_blocks.extend(blocks)
             else:
-                messages.append(CanonicalMessage(role=msg.role, content=blocks))
+                messages.append(
+                    CanonicalMessage(
+                        role=cast(
+                            Literal["system", "user", "assistant", "tool"], msg.role
+                        ),
+                        content=blocks,
+                    )
+                )
         tools = [self._to_tool_spec(tool) for tool in list(req.tools or [])]
         return CanonicalChatRequest(
             protocol="openai",
@@ -62,6 +64,7 @@ class OpenAIProtocolAdapter(ProtocolAdapter):
             stream=req.stream,
             tools=tools,
             tool_choice=req.tool_choice,
+            parallel_tool_calls=req.parallel_tool_calls,
             resume_session_id=resume_session_id,
         )
 
@@ -79,21 +82,17 @@ class OpenAIProtocolAdapter(ProtocolAdapter):
         content_for_parse = strip_session_id_suffix(reply)
         chat_id, created = self._response_context(req)
         if req.tools:
-            parsed = parse_react_output(content_for_parse)
-            tool_calls_list = react_output_to_tool_calls(parsed) if parsed else []
-            if tool_calls_list:
-                thought_ns = ""
-                if "Thought" in content_for_parse:
-                    match = re.search(
-                        r"Thought[:：]\s*(.+?)(?=\s*Action[:：]|$)",
-                        content_for_parse,
-                        re.DOTALL | re.I,
-                    )
-                    thought_ns = (match.group(1) or "").strip() if match else ""
-                text_content = (
-                    f"<think>{thought_ns}</think>\n{session_marker}".strip()
-                    if thought_ns
-                    else session_marker
+            parsed = parse_tagged_output(content_for_parse)
+            if parsed.is_tool_call:
+                tool_calls_list = [
+                    {
+                        "name": tool_call.name,
+                        "arguments": tool_call.arguments,
+                    }
+                    for tool_call in parsed.tool_calls
+                ]
+                text_content = self._thinking_text_for_openai(
+                    parsed.thinking, session_marker
                 )
                 return build_tool_calls_response(
                     tool_calls_list,
@@ -102,7 +101,7 @@ class OpenAIProtocolAdapter(ProtocolAdapter):
                     created,
                     text_content=text_content,
                 )
-            content_reply = format_react_final_answer_content(content_for_parse)
+            content_reply = format_openai_tagged_answer(parsed)
             if session_marker:
                 content_reply += session_marker
         else:
@@ -127,12 +126,26 @@ class OpenAIProtocolAdapter(ProtocolAdapter):
         raw_stream: AsyncIterator[OpenAIStreamEvent],
     ) -> AsyncIterator[str]:
         chat_id, created = self._response_context(req)
-        parser = ReactStreamParser(
-            chat_id=chat_id,
-            model=req.model,
-            created=created,
-            has_tools=bool(req.tools),
-        )
+        if not req.tools:
+            session_marker = ""
+            async for event in raw_stream:
+                if event.type == "content_delta" and event.content:
+                    chunk = event.content
+                    if extract_session_id_marker(chunk) and not strip_session_id_suffix(
+                        chunk
+                    ):
+                        session_marker = chunk
+                        continue
+                    yield self._content_delta(chat_id, req.model, created, chunk)
+                elif event.type == "finish":
+                    break
+            if session_marker:
+                yield self._content_delta(chat_id, req.model, created, session_marker)
+            yield self._finish_delta(chat_id, req.model, created, "stop")
+            yield "data: [DONE]\n\n"
+            return
+
+        parser = TaggedStreamParser()
         session_marker = ""
         async for event in raw_stream:
             if event.type == "content_delta" and event.content:
@@ -142,14 +155,26 @@ class OpenAIProtocolAdapter(ProtocolAdapter):
                 ):
                     session_marker = chunk
                     continue
-                for sse in parser.feed(chunk):
-                    yield sse
+                for tagged_event in parser.feed(chunk):
+                    if tagged_event.type == "message_stop" and session_marker:
+                        yield self._content_delta(
+                            chat_id, req.model, created, session_marker
+                        )
+                        session_marker = ""
+                    for sse in self._render_tagged_stream_event(
+                        chat_id, req.model, created, tagged_event
+                    ):
+                        yield sse
             elif event.type == "finish":
                 break
-        if session_marker:
-            yield self._content_delta(chat_id, req.model, created, session_marker)
-        for sse in parser.finish():
-            yield sse
+        for tagged_event in parser.finish():
+            if tagged_event.type == "message_stop" and session_marker:
+                yield self._content_delta(chat_id, req.model, created, session_marker)
+                session_marker = ""
+            for sse in self._render_tagged_stream_event(
+                chat_id, req.model, created, tagged_event
+            ):
+                yield sse
 
     def render_error(self, exc: Exception) -> tuple[int, dict[str, Any]]:
         status = 400 if isinstance(exc, ValueError) else 500
@@ -163,8 +188,10 @@ class OpenAIProtocolAdapter(ProtocolAdapter):
     def _message_to_raw_dict(msg: OpenAIMessage) -> dict[str, Any]:
         if isinstance(msg.content, list):
             content: str | list[dict[str, Any]] = [p.model_dump() for p in msg.content]
-        else:
+        elif isinstance(msg.content, str):
             content = msg.content
+        else:
+            content = ""
         out: dict[str, Any] = {"role": msg.role, "content": content}
         if msg.tool_calls is not None:
             out["tool_calls"] = msg.tool_calls
@@ -204,15 +231,72 @@ class OpenAIProtocolAdapter(ProtocolAdapter):
                     blocks.append(CanonicalContentBlock(type="image", url=str(url)))
         return blocks
 
+    @classmethod
+    def _message_to_blocks(cls, msg: OpenAIMessage) -> list[CanonicalContentBlock]:
+        if msg.role == "tool":
+            return cls._tool_message_to_blocks(msg)
+
+        blocks = cls._to_blocks(msg.content)
+        if msg.role == "assistant" and msg.tool_calls:
+            blocks.extend(cls._tool_calls_to_blocks(msg.tool_calls))
+        return blocks
+
+    @classmethod
+    def _tool_message_to_blocks(cls, msg: OpenAIMessage) -> list[CanonicalContentBlock]:
+        text_parts = [
+            block.text or ""
+            for block in cls._to_blocks(msg.content)
+            if block.type == "text"
+        ]
+        return [
+            CanonicalContentBlock(
+                type="tool_result",
+                tool_use_id=msg.tool_call_id or "",
+                text="\n".join(part for part in text_parts if part),
+            )
+        ]
+
+    @staticmethod
+    def _tool_calls_to_blocks(
+        tool_calls: list[dict[str, Any]],
+    ) -> list[CanonicalContentBlock]:
+        blocks: list[CanonicalContentBlock] = []
+        for tool_call in tool_calls:
+            function = tool_call.get("function") or {}
+            if not isinstance(function, dict):
+                continue
+            raw_args = function.get("arguments", {})
+            if isinstance(raw_args, str):
+                try:
+                    arguments = json.loads(raw_args) if raw_args else {}
+                except json.JSONDecodeError:
+                    arguments = {}
+            elif isinstance(raw_args, dict):
+                arguments = raw_args
+            else:
+                arguments = {}
+            blocks.append(
+                CanonicalContentBlock(
+                    type="tool_use",
+                    id=str(tool_call.get("id") or ""),
+                    name=str(function.get("name") or ""),
+                    input=arguments,
+                )
+            )
+        return blocks
+
     @staticmethod
     def _to_tool_spec(tool: dict[str, Any]) -> CanonicalToolSpec:
-        function = tool.get("function") if tool.get("type") == "function" else tool
+        function_obj = tool.get("function") if tool.get("type") == "function" else tool
+        function: dict[str, Any] = (
+            function_obj if isinstance(function_obj, dict) else {}
+        )
         return CanonicalToolSpec(
             name=str(function.get("name") or ""),
             description=str(function.get("description") or ""),
-            input_schema=function.get("parameters")
-            or function.get("input_schema")
-            or {},
+            input_schema=(
+                function.get("parameters") or function.get("input_schema") or {}
+            ),
             strict=bool(function.get("strict") or False),
         )
 
@@ -239,6 +323,160 @@ class OpenAIProtocolAdapter(ProtocolAdapter):
             )
             + "\n\n"
         )
+
+    @staticmethod
+    def _assistant_start(chat_id: str, model: str, created: int) -> str:
+        return (
+            "data: "
+            + json.dumps(
+                {
+                    "id": chat_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": ""},
+                            "logprobs": None,
+                            "finish_reason": None,
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            + "\n\n"
+        )
+
+    @staticmethod
+    def _tool_calls_delta(
+        chat_id: str,
+        model: str,
+        created: int,
+        tool_calls: list[dict[str, Any]],
+    ) -> str:
+        return (
+            "data: "
+            + json.dumps(
+                {
+                    "id": chat_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"tool_calls": tool_calls},
+                            "logprobs": None,
+                            "finish_reason": None,
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            + "\n\n"
+        )
+
+    @staticmethod
+    def _finish_delta(chat_id: str, model: str, created: int, reason: str) -> str:
+        return (
+            "data: "
+            + json.dumps(
+                {
+                    "id": chat_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {},
+                            "logprobs": None,
+                            "finish_reason": reason,
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            + "\n\n"
+        )
+
+    @staticmethod
+    def _thinking_text_for_openai(
+        thinking: str | None,
+        session_marker: str = "",
+    ) -> str:
+        parts: list[str] = []
+        if thinking:
+            parts.append(f"<think>{thinking}</think>")
+        if session_marker:
+            parts.append(session_marker)
+        return "\n".join(part for part in parts if part)
+
+    def _render_tagged_stream_event(
+        self,
+        chat_id: str,
+        model: str,
+        created: int,
+        event: TaggedStreamEvent,
+    ) -> list[str]:
+        if event.type == "message_start":
+            return [self._assistant_start(chat_id, model, created)]
+        if event.type == "block_start":
+            if event.block_type == "thinking":
+                return [self._content_delta(chat_id, model, created, "<think>")]
+            return []
+        if event.type == "block_delta":
+            if event.text:
+                return [self._content_delta(chat_id, model, created, event.text)]
+            return []
+        if event.type == "block_end":
+            if event.block_type == "thinking":
+                return [self._content_delta(chat_id, model, created, "</think>")]
+            return []
+        if event.type == "tool_call":
+            call_index = event.call_index or 0
+            tool_call_id = f"call_{uuid_mod.uuid4().hex[:24]}"
+            out = [
+                self._tool_calls_delta(
+                    chat_id,
+                    model,
+                    created,
+                    [
+                        {
+                            "index": call_index,
+                            "id": tool_call_id,
+                            "type": "function",
+                            "function": {
+                                "name": event.name or "",
+                                "arguments": "",
+                            },
+                        }
+                    ],
+                )
+            ]
+            args = json.dumps(event.arguments or {}, ensure_ascii=False)
+            if args:
+                out.append(
+                    self._tool_calls_delta(
+                        chat_id,
+                        model,
+                        created,
+                        [
+                            {
+                                "index": call_index,
+                                "function": {"arguments": args},
+                            }
+                        ],
+                    )
+                )
+            return out
+        if event.type == "message_stop":
+            reason = "tool_calls" if event.stop_reason == "tool_use" else "stop"
+            return [self._finish_delta(chat_id, model, created, reason), "data: [DONE]\n\n"]
+        if event.type == "error":
+            raise ValueError(event.error or "tagged stream parser error")
+        return []
 
     @staticmethod
     def _response_context(req: CanonicalChatRequest) -> tuple[str, int]:

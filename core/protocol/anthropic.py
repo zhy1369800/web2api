@@ -6,16 +6,16 @@ import json
 import time
 import uuid as uuid_mod
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal, cast
 
 from core.api.conv_parser import (
     decode_latest_session_id,
     extract_session_id_marker,
     strip_session_id_suffix,
 )
-from core.api.react import format_react_final_answer_content, parse_react_output
-from core.api.react_stream_parser import ReactStreamParser
 from core.hub.schemas import OpenAIStreamEvent
+from core.api.tagged_output import parse_tagged_output
+from core.api.tagged_stream_parser import TaggedStreamEvent, TaggedStreamParser
 from core.protocol.base import ProtocolAdapter
 from core.protocol.schemas import (
     CanonicalChatRequest,
@@ -51,7 +51,7 @@ class AnthropicProtocolAdapter(ProtocolAdapter):
                     block.text = strip_session_id_suffix(text)
             canonical_messages.append(
                 CanonicalMessage(
-                    role=str(item.get("role") or "user"),
+                    role=self._canonical_role(str(item.get("role") or "user"), blocks),
                     content=blocks,
                 )
             )
@@ -78,6 +78,9 @@ class AnthropicProtocolAdapter(ProtocolAdapter):
             stop_sequences=[str(v) for v in stop_sequences if isinstance(v, str)],
             tools=tools,
             tool_choice=raw_body.get("tool_choice"),
+            parallel_tool_calls=raw_body.get("parallel_tool_calls")
+            if isinstance(raw_body.get("parallel_tool_calls"), bool)
+            else None,
             resume_session_id=resume_session_id,
         )
 
@@ -95,16 +98,20 @@ class AnthropicProtocolAdapter(ProtocolAdapter):
         text = strip_session_id_suffix(full)
         message_id = self._message_id(req)
         if req.tools:
-            parsed = parse_react_output(text)
-            if parsed and parsed.get("type") == "tool_call":
-                content: list[dict[str, Any]] = [
-                    {
-                        "type": "tool_use",
-                        "id": f"toolu_{uuid_mod.uuid4().hex[:24]}",
-                        "name": str(parsed.get("tool") or ""),
-                        "input": parsed.get("params") or {},
-                    }
-                ]
+            parsed = parse_tagged_output(text)
+            content: list[dict[str, Any]] = []
+            if parsed.thinking:
+                content.append({"type": "thinking", "thinking": parsed.thinking})
+            if parsed.is_tool_call:
+                for tool_call in parsed.tool_calls:
+                    content.append(
+                        {
+                            "type": "tool_use",
+                            "id": f"toolu_{uuid_mod.uuid4().hex[:24]}",
+                            "name": tool_call.name,
+                            "input": tool_call.arguments,
+                        }
+                    )
                 if session_marker:
                     content.append({"type": "text", "text": session_marker})
                 return self._message_response(
@@ -113,9 +120,16 @@ class AnthropicProtocolAdapter(ProtocolAdapter):
                     content,
                     stop_reason="tool_use",
                 )
-            rendered = format_react_final_answer_content(text)
-        else:
-            rendered = text
+            content.append(
+                {"type": "text", "text": (parsed.final_answer or "") + session_marker}
+            )
+            return self._message_response(
+                req,
+                message_id,
+                content,
+                stop_reason="end_turn",
+            )
+        rendered = text
         if session_marker:
             rendered += session_marker
         return self._message_response(
@@ -131,14 +145,43 @@ class AnthropicProtocolAdapter(ProtocolAdapter):
         raw_stream: AsyncIterator[OpenAIStreamEvent],
     ) -> AsyncIterator[str]:
         message_id = self._message_id(req)
-        parser = ReactStreamParser(
-            chat_id=f"chatcmpl-{uuid_mod.uuid4().hex[:24]}",
-            model=req.model,
-            created=int(time.time()),
-            has_tools=bool(req.tools),
-        )
+        if not req.tools:
+            renderer = _AnthropicTaggedRenderer(req, message_id)
+            text_block_open = False
+            session_marker = ""
+            async for event in raw_stream:
+                if event.type == "content_delta" and event.content:
+                    chunk = event.content
+                    if extract_session_id_marker(chunk) and not strip_session_id_suffix(
+                        chunk
+                    ):
+                        session_marker = chunk
+                        continue
+                    if not text_block_open:
+                        for out in renderer.start_block("text"):
+                            yield out
+                        text_block_open = True
+                    for out in renderer.block_delta("text", chunk):
+                        yield out
+                elif event.type == "finish":
+                    break
+            if session_marker:
+                if not text_block_open:
+                    for out in renderer.start_block("text"):
+                        yield out
+                    text_block_open = True
+                for out in renderer.block_delta("text", session_marker):
+                    yield out
+            if text_block_open:
+                for out in renderer.end_block():
+                    yield out
+            for out in renderer.message_stop("end_turn"):
+                yield out
+            return
+
+        parser = TaggedStreamParser()
         session_marker = ""
-        translator = _AnthropicStreamTranslator(req, message_id)
+        renderer = _AnthropicTaggedRenderer(req, message_id)
         async for event in raw_stream:
             if event.type == "content_delta" and event.content:
                 chunk = event.content
@@ -147,13 +190,21 @@ class AnthropicProtocolAdapter(ProtocolAdapter):
                 ):
                     session_marker = chunk
                     continue
-                for sse in parser.feed(chunk):
-                    for out in translator.feed_openai_sse(sse):
+                for tagged_event in parser.feed(chunk):
+                    if tagged_event.type == "message_stop" and session_marker:
+                        for out in renderer.marker_text_block(session_marker):
+                            yield out
+                        session_marker = ""
+                    for out in renderer.render(tagged_event):
                         yield out
             elif event.type == "finish":
                 break
-        for sse in parser.finish():
-            for out in translator.feed_openai_sse(sse, session_marker=session_marker):
+        for tagged_event in parser.finish():
+            if tagged_event.type == "message_stop" and session_marker:
+                for out in renderer.marker_text_block(session_marker):
+                    yield out
+                session_marker = ""
+            for out in renderer.render(tagged_event):
                 yield out
 
     def render_error(self, exc: Exception) -> tuple[int, dict[str, Any]]:
@@ -173,6 +224,18 @@ class AnthropicProtocolAdapter(ProtocolAdapter):
             name=str(tool.get("name") or ""),
             description=str(tool.get("description") or ""),
             input_schema=tool.get("input_schema") or {},
+        )
+
+    @staticmethod
+    def _canonical_role(
+        raw_role: str,
+        blocks: list[CanonicalContentBlock],
+    ) -> Literal["system", "user", "assistant", "tool"]:
+        if raw_role == "user" and any(block.type == "tool_result" for block in blocks):
+            return "tool"
+        return cast(
+            Literal["system", "user", "assistant", "tool"],
+            raw_role,
         )
 
     @staticmethod
@@ -196,6 +259,12 @@ class AnthropicProtocolAdapter(ProtocolAdapter):
                             type="text", text=str(item.get("text") or "")
                         )
                     )
+                elif item_type == "thinking":
+                    blocks.append(
+                        CanonicalContentBlock(
+                            type="thinking", text=str(item.get("thinking") or "")
+                        )
+                    )
                 elif item_type == "image":
                     source = item.get("source") or {}
                     source_type = source.get("type")
@@ -207,6 +276,17 @@ class AnthropicProtocolAdapter(ProtocolAdapter):
                                 data=str(source.get("data") or ""),
                             )
                         )
+                elif item_type == "tool_use":
+                    blocks.append(
+                        CanonicalContentBlock(
+                            type="tool_use",
+                            id=str(item.get("id") or ""),
+                            name=str(item.get("name") or ""),
+                            input=item.get("input")
+                            if isinstance(item.get("input"), dict)
+                            else {},
+                        )
+                    )
                 elif item_type == "tool_result":
                     text_parts = AnthropicProtocolAdapter._parse_content(
                         item.get("content")
@@ -254,208 +334,184 @@ class AnthropicProtocolAdapter(ProtocolAdapter):
         )
 
 
-class _AnthropicStreamTranslator:
+class _AnthropicTaggedRenderer:
     def __init__(self, req: CanonicalChatRequest, message_id: str) -> None:
         self._req = req
         self._message_id = message_id
         self._started = False
-        self._current_block_type: str | None = None
         self._current_index = -1
-        self._pending_tool_id: str | None = None
-        self._pending_tool_name: str | None = None
-        self._stopped = False
+        self._current_block_type: str | None = None
 
-    def feed_openai_sse(
-        self,
-        sse: str,
-        *,
-        session_marker: str = "",
-    ) -> list[str]:
-        lines = [line for line in sse.splitlines() if line.startswith("data: ")]
-        out: list[str] = []
-        for line in lines:
-            payload = line[6:].strip()
-            if payload == "[DONE]":
-                continue
-            obj = json.loads(payload)
-            choice = (obj.get("choices") or [{}])[0]
-            delta = choice.get("delta") or {}
-            finish_reason = choice.get("finish_reason")
-            if not self._started:
-                out.append(
-                    self._event(
-                        "message_start",
-                        {
-                            "type": "message_start",
-                            "message": {
-                                "id": self._message_id,
-                                "type": "message",
-                                "role": "assistant",
-                                "model": self._req.model,
-                                "content": [],
-                                "stop_reason": None,
-                                "stop_sequence": None,
-                                "usage": {"input_tokens": 0, "output_tokens": 0},
-                            },
-                        },
-                    )
-                )
-                self._started = True
-
-            content = delta.get("content")
-            if isinstance(content, str) and content:
-                out.extend(self._ensure_text_block())
-                out.append(
-                    self._event(
-                        "content_block_delta",
-                        {
-                            "type": "content_block_delta",
-                            "index": self._current_index,
-                            "delta": {"type": "text_delta", "text": content},
-                        },
-                    )
-                )
-
-            tool_calls = delta.get("tool_calls") or []
-            if tool_calls:
-                head = tool_calls[0]
-                if head.get("id") and head.get("function", {}).get("name") is not None:
-                    out.extend(self._close_current_block())
-                    self._current_index += 1
-                    self._current_block_type = "tool_use"
-                    self._pending_tool_id = str(head.get("id") or "")
-                    self._pending_tool_name = str(
-                        head.get("function", {}).get("name") or ""
-                    )
-                    out.append(
-                        self._event(
-                            "content_block_start",
-                            {
-                                "type": "content_block_start",
-                                "index": self._current_index,
-                                "content_block": {
-                                    "type": "tool_use",
-                                    "id": self._pending_tool_id,
-                                    "name": self._pending_tool_name,
-                                    "input": {},
-                                },
-                            },
-                        )
-                    )
-                args_delta = head.get("function", {}).get("arguments")
-                if args_delta:
-                    out.append(
-                        self._event(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": self._current_index,
-                                "delta": {
-                                    "type": "input_json_delta",
-                                    "partial_json": str(args_delta),
-                                },
-                            },
-                        )
-                    )
-
-            if finish_reason:
-                if session_marker:
-                    if finish_reason == "tool_calls":
-                        out.extend(self._close_current_block())
-                        out.extend(self._emit_marker_text_block(session_marker))
-                    else:
-                        out.extend(self._ensure_text_block())
-                        out.append(
-                            self._event(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": self._current_index,
-                                    "delta": {
-                                        "type": "text_delta",
-                                        "text": session_marker,
-                                    },
-                                },
-                            )
-                        )
-                out.extend(self._close_current_block())
-                stop_reason = (
-                    "tool_use" if finish_reason == "tool_calls" else "end_turn"
-                )
-                out.append(
-                    self._event(
-                        "message_delta",
-                        {
-                            "type": "message_delta",
-                            "delta": {
-                                "stop_reason": stop_reason,
-                                "stop_sequence": None,
-                            },
-                            "usage": {"output_tokens": 0},
-                        },
-                    )
-                )
-                out.append(self._event("message_stop", {"type": "message_stop"}))
-                self._stopped = True
-        return out
-
-    def _ensure_text_block(self) -> list[str]:
-        if self._current_block_type == "text":
+    def render(self, event: TaggedStreamEvent) -> list[str]:
+        if event.type == "message_start":
+            return self._message_start()
+        if event.type == "block_start":
+            if event.block_type == "thinking":
+                return self.start_block("thinking")
+            if event.block_type == "text":
+                return self.start_block("text")
             return []
-        out = self._close_current_block()
+        if event.type == "block_delta":
+            if event.block_type and event.text:
+                return self.block_delta(event.block_type, event.text)
+            return []
+        if event.type == "block_end":
+            return self.end_block()
+        if event.type == "tool_call":
+            return self.tool_call(event.name or "", event.arguments or {})
+        if event.type == "message_stop":
+            return self.message_stop(event.stop_reason or "end_turn")
+        if event.type == "error":
+            raise ValueError(event.error or "tagged stream parser error")
+        return []
+
+    def start_block(self, block_type: Literal["thinking", "text"]) -> list[str]:
+        out = self._message_start()
+        out.extend(self.end_block())
         self._current_index += 1
-        self._current_block_type = "text"
-        out.append(
-            self._event(
-                "content_block_start",
-                {
-                    "type": "content_block_start",
-                    "index": self._current_index,
-                    "content_block": {"type": "text", "text": ""},
-                },
-            )
-        )
+        self._current_block_type = block_type
+        if block_type == "thinking":
+            payload = {
+                "type": "content_block_start",
+                "index": self._current_index,
+                "content_block": {"type": "thinking", "thinking": ""},
+            }
+        else:
+            payload = {
+                "type": "content_block_start",
+                "index": self._current_index,
+                "content_block": {"type": "text", "text": ""},
+            }
+        out.append(self._event(payload))
         return out
 
-    def _emit_marker_text_block(self, marker: str) -> list[str]:
-        self._current_index += 1
-        self._current_block_type = "text"
+    def block_delta(
+        self,
+        block_type: Literal["thinking", "text"],
+        text: str,
+    ) -> list[str]:
+        if self._current_block_type != block_type:
+            raise ValueError(f"unexpected delta for block type: {block_type}")
+        if block_type == "thinking":
+            delta = {"type": "thinking_delta", "thinking": text}
+        else:
+            delta = {"type": "text_delta", "text": text}
         return [
             self._event(
-                "content_block_start",
-                {
-                    "type": "content_block_start",
-                    "index": self._current_index,
-                    "content_block": {"type": "text", "text": ""},
-                },
-            ),
-            self._event(
-                "content_block_delta",
                 {
                     "type": "content_block_delta",
                     "index": self._current_index,
-                    "delta": {"type": "text_delta", "text": marker},
-                },
-            ),
-            self._event(
-                "content_block_stop",
-                {"type": "content_block_stop", "index": self._current_index},
-            ),
+                    "delta": delta,
+                }
+            )
         ]
 
-    def _close_current_block(self) -> list[str]:
+    def end_block(self) -> list[str]:
         if self._current_block_type is None:
             return []
         block_index = self._current_index
         self._current_block_type = None
         return [
             self._event(
-                "content_block_stop",
-                {"type": "content_block_stop", "index": block_index},
+                {
+                    "type": "content_block_stop",
+                    "index": block_index,
+                }
+            )
+        ]
+
+    def tool_call(self, name: str, arguments: dict[str, Any]) -> list[str]:
+        out = self._message_start()
+        out.extend(self.end_block())
+        self._current_index += 1
+        tool_id = f"toolu_{uuid_mod.uuid4().hex[:24]}"
+        out.append(
+            self._event(
+                {
+                    "type": "content_block_start",
+                    "index": self._current_index,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": name,
+                        "input": {},
+                    },
+                }
+            )
+        )
+        args_json = json.dumps(arguments, ensure_ascii=False)
+        if args_json:
+            out.append(
+                self._event(
+                    {
+                        "type": "content_block_delta",
+                        "index": self._current_index,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": args_json,
+                        },
+                    }
+                )
+            )
+        out.append(
+            self._event(
+                {
+                    "type": "content_block_stop",
+                    "index": self._current_index,
+                }
+            )
+        )
+        self._current_block_type = None
+        return out
+
+    def marker_text_block(self, marker: str) -> list[str]:
+        if not marker:
+            return []
+        out = self.start_block("text")
+        out.extend(self.block_delta("text", marker))
+        out.extend(self.end_block())
+        return out
+
+    def message_stop(self, stop_reason: str) -> list[str]:
+        out = self._message_start()
+        out.extend(self.end_block())
+        out.append(
+            self._event(
+                {
+                    "type": "message_delta",
+                    "delta": {
+                        "stop_reason": stop_reason,
+                        "stop_sequence": None,
+                    },
+                    "usage": {"output_tokens": 0},
+                }
+            )
+        )
+        out.append(self._event({"type": "message_stop"}))
+        return out
+
+    def _message_start(self) -> list[str]:
+        if self._started:
+            return []
+        self._started = True
+        return [
+            self._event(
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": self._message_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "model": self._req.model,
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    },
+                }
             )
         ]
 
     @staticmethod
-    def _event(event_name: str, payload: dict[str, Any]) -> str:
-        del event_name
+    def _event(payload: dict[str, Any]) -> str:
         return f"event: {payload['type']}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"

@@ -15,7 +15,7 @@ Legacy routes are also supported: `POST /claude/v1/chat/completions`, `GET /clau
 
 - Image input support
 - Streaming and non‑streaming responses
-- Tools call / ReAct‑style tool calling
+- Tools via the tagged tool protocol
 - Dual protocol support: OpenAI / Anthropic (`/v1/chat/completions`, `/v1/messages`, etc.)
 - Visual config UI for proxy groups, account pool, fingerprint, timezone, etc.
 

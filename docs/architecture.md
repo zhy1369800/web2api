@@ -149,12 +149,12 @@ ProxyGroup（代理组）
 
 ## 10. Tools / Function Calling
 
-Tools 仍走 ReAct 兼容层，不依赖站点原生 function calling：
+Tools 走 tagged tool protocol，不依赖站点原生 function calling：
 
-- 请求带 `tools` 时，服务端注入 ReAct Prompt
-- 模型输出 `Thought / Action / Action Input`
-- 服务端解析成 OpenAI `tool_calls`
-- 新建会话时，完整历史回放也会保留这套 ReAct 格式
+- 请求带 `tools` 时，服务端注入 tagged prompt
+- 模型输出 `<think>` + `<tool_call>` / `<final_answer>`
+- 服务端解析成中间事件，再映射成 OpenAI `tool_calls` 或 Anthropic `tool_use`
+- 新建会话时，完整历史回放会保留这套 tagged 协议语义
 
 ## 11. 插件职责
 

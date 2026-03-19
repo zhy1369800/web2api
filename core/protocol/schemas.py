@@ -45,6 +45,7 @@ class CanonicalChatRequest(BaseModel):
     stop_sequences: list[str] = Field(default_factory=list)
     tools: list[CanonicalToolSpec] = Field(default_factory=list)
     tool_choice: str | dict[str, Any] | None = None
+    parallel_tool_calls: bool | None = None
     resume_session_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 

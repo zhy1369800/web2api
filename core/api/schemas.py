@@ -1,5 +1,6 @@
 """OpenAI 兼容的请求/响应模型。"""
 
+import json
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -82,8 +83,14 @@ def _norm_content(c: str | list[OpenAIContentPart] | None) -> str:
     )
 
 
-REACT_STRICT_SUFFIX = (
-    "(严格 ReAct 执行模式;禁止输出「无法执行工具所以直接给方案」等解释或替代内容)"
+TAGGED_TOOL_STRICT_SUFFIX = (
+    "(严格工具协议模式;如需调用工具, 只能输出 <think> 与一个终结块标签, "
+    "终结块只能是 <tool_calls> 或 <final_answer>, 禁止输出标签外文本或替代方案)"
+)
+
+TAGGED_TOOL_STRICT_SUFFIX_SINGLE = (
+    "(严格工具协议模式;如需调用工具, 只能输出 <think> 与一个终结块标签, "
+    "终结块只能是 <tool_call> 或 <final_answer>, 禁止输出标签外文本或替代方案)"
 )
 
 
@@ -91,7 +98,8 @@ def extract_user_content(
     messages: list[OpenAIMessage],
     *,
     has_tools: bool = False,
-    react_prompt_prefix: str = "",
+    tagged_prompt_prefix: str = "",
+    allow_parallel_tool_calls: bool = True,
     full_history: bool = False,
 ) -> str:
     """
@@ -99,7 +107,8 @@ def extract_user_content(
     网页/会话侧已有完整历史，只取尾部：最后一条为 user 时，从后向前找到最后一个 assistant（不包含），
     取该 assistant 之后到末尾；最后一条为 tool 时，从后向前找到最后一个 user（不包含），取该 user 之后到末尾。
     支持 user、assistant、tool 角色；assistant 的 tool_calls 与 tool 结果会拼回。
-    ReAct 模式：完整 ReAct Prompt 仅第一次对话传入（按完整 messages 判断 is_first_turn）；后续只传尾部内容。
+    Tagged tool 模式：完整工具协议 Prompt 仅第一次对话传入（按完整 messages 判断 is_first_turn）；
+    后续只传尾部内容。
     """
     if not messages:
         return ""
@@ -108,8 +117,8 @@ def extract_user_content(
 
     # 重建会话时会把完整历史重新回放给站点，因此 tools 指令也需要重新注入。
     is_first_turn = not any(m.role in ("assistant", "tool") for m in messages)
-    if has_tools and react_prompt_prefix and (full_history or is_first_turn):
-        parts.append(react_prompt_prefix)
+    if has_tools and tagged_prompt_prefix and (full_history or is_first_turn):
+        parts.append(tagged_prompt_prefix)
 
     if full_history:
         tail = messages
@@ -137,19 +146,72 @@ def extract_user_content(
             txt = _norm_content(m.content)
             if txt:
                 if has_tools:
-                    parts.append(f"**User**: {txt} {REACT_STRICT_SUFFIX}")
+                    strict_suffix = (
+                        TAGGED_TOOL_STRICT_SUFFIX
+                        if allow_parallel_tool_calls
+                        else TAGGED_TOOL_STRICT_SUFFIX_SINGLE
+                    )
+                    parts.append(f"**User**: {txt} {strict_suffix}")
                 else:
                     parts.append(f"User：{txt}")
         elif m.role == "assistant":
             tool_calls_list = list(m.tool_calls or [])
             if tool_calls_list:
+                content_text = _norm_content(m.content)
+                if content_text:
+                    parts.append(f"**Assistant**:\n\n{content_text}")
+                replay_payloads: list[dict[str, Any]] = []
+                call_ids: list[str] = []
                 for tc in tool_calls_list:
                     fn = tc.get("function") or {}
                     call_id = tc.get("id", "")
+                    if call_id:
+                        call_ids.append(str(call_id))
                     name = fn.get("name", "")
                     args = fn.get("arguments", "{}")
+                    if isinstance(args, str):
+                        try:
+                            args_obj = json.loads(args)
+                        except json.JSONDecodeError:
+                            args_obj = {"raw": args}
+                    elif isinstance(args, dict):
+                        args_obj = args
+                    else:
+                        args_obj = {"raw": str(args)}
+                    replay_payloads.append(
+                        {
+                            "name": name,
+                            "arguments": args_obj,
+                        }
+                    )
+                if len(replay_payloads) == 1 and not allow_parallel_tool_calls:
+                    label = (
+                        f"**Assistant(Call ID: {call_ids[0]})**:"
+                        if call_ids
+                        else "**Assistant**:"
+                    )
                     parts.append(
-                        f"**Assistant**:\n\n```\nAction: {name}\nAction Input: {args}\nCall ID: {call_id}\n```"
+                        label
+                        + "\n\n<tool_call>"
+                        + json.dumps(replay_payloads[0], ensure_ascii=False)
+                        + "</tool_call>"
+                    )
+                else:
+                    if not call_ids:
+                        label = "**Assistant**:"
+                    elif len(call_ids) == 1:
+                        label = f"**Assistant(Call ID: {call_ids[0]})**:"
+                    else:
+                        label = (
+                            "**Assistant(Call IDs: "
+                            + ", ".join(call_ids)
+                            + ")**:"
+                        )
+                    parts.append(
+                        label
+                        + "\n\n<tool_calls>"
+                        + json.dumps(replay_payloads, ensure_ascii=False)
+                        + "</tool_calls>"
                     )
             else:
                 txt = _norm_content(m.content)
@@ -161,7 +223,35 @@ def extract_user_content(
         elif m.role == "tool":
             txt = _norm_content(m.content)
             call_id = m.tool_call_id or ""
+            terminal_desc = (
+                "<tool_calls>[...]</tool_calls>"
+                if allow_parallel_tool_calls
+                else "<tool_call>{...}</tool_call>"
+            )
+            single_tool_rule = (
+                "If only one tool is needed, still use a JSON array with one item.\n"
+                if allow_parallel_tool_calls
+                else ""
+            )
+            json_target = "<tool_calls>" if allow_parallel_tool_calls else "<tool_call>"
             parts.append(
-                f"**Observation(Call ID: {call_id})**: {txt}\n\n请根据以上观察结果继续。如需调用工具，输出 Thought / Action / Action Input；若任务已完成，输出 Final Answer。"
+                f"Tool result for call_id={call_id}:\n"
+                "<tool_result>\n"
+                f"{txt}\n"
+                "</tool_result>\n\n"
+                "Now output exactly one response using only the tagged protocol:\n"
+                "- optional <think>...</think>\n"
+                f"- then exactly one {terminal_desc} or "
+                "<final_answer>...</final_answer>\n"
+                "Do not output Observation.\n"
+                "Do not output <tool_result>.\n"
+                "Do not output tool results.\n"
+                "Do not output a second terminal block.\n"
+                f"Stop immediately after </{'tool_calls' if allow_parallel_tool_calls else 'tool_call'}> "
+                "or </final_answer>.\n"
+                f"Inside {json_target}, the content must be valid JSON.\n"
+                f"{single_tool_rule}"
+                "If a string value contains quotes, backslashes, or newlines, "
+                "escape them exactly as JSON requires."
             )
     return "\n".join(parts)

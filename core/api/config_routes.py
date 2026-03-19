@@ -23,12 +23,18 @@ from core.api.auth import (
     verify_config_secret,
 )
 from core.api.chat_handler import ChatHandler
+from core.api.deps import get_config_repo
 from core.config.repository import ConfigRepository
 from core.plugin.base import PluginRegistry
 
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+NO_CACHE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
 
 
 class AdminLoginRequest(BaseModel):
@@ -45,22 +51,21 @@ def create_config_router() -> APIRouter:
 
     @router.get("/api/config")
     def get_config(
-        request: Request, _: None = Depends(require_config_login)
+        _: None = Depends(require_config_login),
+        repo: ConfigRepository = Depends(get_config_repo),
     ) -> list[dict[str, Any]]:
         """获取配置（代理组 + 账号 name/type/auth）。"""
-        repo: ConfigRepository | None = getattr(request.app.state, "config_repo", None)
-        if repo is None:
-            raise HTTPException(status_code=503, detail="服务未就绪")
         return repo.load_raw()
 
     @router.get("/api/config/status")
     def get_config_status(
-        request: Request, _: None = Depends(require_config_login)
+        request: Request,
+        _: None = Depends(require_config_login),
+        repo: ConfigRepository = Depends(get_config_repo),
     ) -> dict[str, Any]:
         """返回配置页需要的账号运行时状态。"""
-        repo: ConfigRepository | None = getattr(request.app.state, "config_repo", None)
         handler: ChatHandler | None = getattr(request.app.state, "chat_handler", None)
-        if repo is None or handler is None:
+        if handler is None:
             raise HTTPException(status_code=503, detail="服务未就绪")
         runtime_status = handler.get_account_runtime_status()
         now = int(time.time())
@@ -90,11 +95,9 @@ def create_config_router() -> APIRouter:
         request: Request,
         config: list[dict[str, Any]],
         _: None = Depends(require_config_login),
+        repo: ConfigRepository = Depends(get_config_repo),
     ) -> dict[str, Any]:
         """更新配置并立即生效。"""
-        repo: ConfigRepository | None = getattr(request.app.state, "config_repo", None)
-        if repo is None:
-            raise HTTPException(status_code=503, detail="服务未就绪")
         if not config:
             raise HTTPException(status_code=400, detail="配置不能为空")
         for i, g in enumerate(config):
@@ -171,7 +174,7 @@ def create_config_router() -> APIRouter:
         path = STATIC_DIR / "login.html"
         if not path.is_file():
             raise HTTPException(status_code=404, detail="登录页未就绪")
-        return FileResponse(path)
+        return FileResponse(path, headers=NO_CACHE_HEADERS)
 
     @router.post("/api/admin/login", response_model=None)
     def admin_login(payload: AdminLoginRequest, request: Request) -> Response:
@@ -221,6 +224,6 @@ def create_config_router() -> APIRouter:
         path = STATIC_DIR / "config.html"
         if not path.is_file():
             raise HTTPException(status_code=404, detail="配置页未就绪")
-        return FileResponse(path)
+        return FileResponse(path, headers=NO_CACHE_HEADERS)
 
     return router

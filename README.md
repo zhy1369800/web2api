@@ -8,7 +8,7 @@ Web2API 是一个**桥接服务**：把网页端的 AI 服务（当前主要是 
 
 - 支持图片输入
 - 支持流式/非流式输出
-- 支持 tools call / ReAct 工具调用
+- 支持 tagged tool protocol 工具调用
 - 支持 OpenAI / Anthropic 双协议（/v1/chat/completions、/v1/messages 等）
 - 提供可视化配置页（代理组、账号池、指纹、时区等）
 

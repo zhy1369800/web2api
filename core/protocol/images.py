@@ -18,7 +18,6 @@ SUPPORTED_IMAGE_MIME_TYPES = {
     "image/gif",
 }
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
-MAX_IMAGE_COUNT = 5
 
 
 @dataclass

@@ -36,8 +36,8 @@ from core.runtime.keys import ProxyKey
 from core.runtime.session_cache import SessionCache, SessionEntry
 
 from core.api.conv_parser import parse_conv_uuid_from_messages, session_id_suffix
-from core.api.react import format_react_prompt
 from core.api.schemas import OpenAIChatRequest, extract_user_content
+from core.api.tagged_output import format_tagged_prompt
 from core.hub.schemas import OpenAIStreamEvent
 
 logger = logging.getLogger(__name__)
@@ -698,7 +698,14 @@ class ChatHandler:
         logger.info("[chat] type=%s parsed conv_uuid=%s", type_name, conv_uuid)
 
         has_tools = bool(req.tools)
-        react_prompt_prefix = format_react_prompt(req.tools or []) if has_tools else ""
+        tagged_prompt_prefix = (
+            format_tagged_prompt(
+                req.tools or [],
+                allow_parallel_tool_calls=req.parallel_tool_calls is not False,
+            )
+            if has_tools
+            else ""
+        )
 
         debug_path = (
             Path(__file__).resolve().parent.parent.parent
@@ -727,12 +734,13 @@ class ChatHandler:
                 content = extract_user_content(
                     req.messages,
                     has_tools=has_tools,
-                    react_prompt_prefix=react_prompt_prefix,
+                    tagged_prompt_prefix=tagged_prompt_prefix,
+                    allow_parallel_tool_calls=req.parallel_tool_calls is not False,
                     full_history=target.full_history,
                 )
                 if not content.strip() and req.attachment_files:
                     content = "Please analyze the attached image."
-                if not content.strip():
+                elif not content.strip():
                     raise ValueError("messages 中需至少有一条带 content 的 user 消息")
 
                 debug_path.parent.mkdir(parents=True, exist_ok=True)

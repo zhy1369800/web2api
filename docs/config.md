@@ -52,24 +52,26 @@ browser:
 
 注意：这更适合容器、Xvfb、远程桌面环境；对本机桌面环境通常不需要。
 
+### 下载目录
+
+默认下载目录会落在每个浏览器实例的 `user-data-dir` 下，形如：
+
+`~/fp-data/<fingerprint_id>/downloads`
+
+也可以在 `config.yaml` 里自定义（会覆盖默认值）：
+
+```yaml
+browser:
+  download_dir: ~/Downloads
+```
+
+建议使用绝对路径或以 `~` 开头的路径。
+
 ### API Key 鉴权
 
 如果不希望任何人拿到地址就能直接调用，建议配置：
 
-```yaml
-auth:
-  api_key: 'your-secret-key'
-```
-
-多客户端可配置多个：
-
-```yaml
-auth:
-  api_key:
-    - 'client-key-1'
-    - 'client-key-2'
-```
-
+````yaml
 启用后：
 
 - `/{type}/v1/*` 都需要带其中一个有效 key
@@ -83,7 +85,7 @@ auth:
 ```yaml
 auth:
   config_secret: '配置页面登录密码'
-```
+````
 
 行为说明：
 

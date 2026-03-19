@@ -21,9 +21,10 @@ from core.api.auth import (
     ensure_config_secret_hashed,
 )
 from core.api.anthropic_routes import create_anthropic_router
-from core.api.chat_handler import ChatHandler
+from core.api.openai_routes import create_openai_router
 from core.api.config_routes import create_config_router
-from core.api.routes import create_router
+
+from core.api.chat_handler import ChatHandler
 from core.config.repository import ConfigRepository
 from core.config.settings import get, get_bool
 from core.constants import CDP_PORT_RANGE, CHROMIUM_BIN
@@ -51,6 +52,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     no_sandbox = get_bool("browser", "no_sandbox", False)
     disable_gpu = get_bool("browser", "disable_gpu", False)
     disable_gpu_sandbox = get_bool("browser", "disable_gpu_sandbox", False)
+    download_dir = (get("browser", "download_dir") or "").strip() or None
     cdp_wait_max_attempts = int(get("browser", "cdp_wait_max_attempts") or 90)
     cdp_wait_interval_seconds = float(
         get("browser", "cdp_wait_interval_seconds") or 2.0
@@ -78,6 +80,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         cdp_wait_max_attempts=cdp_wait_max_attempts,
         cdp_wait_interval_seconds=cdp_wait_interval_seconds,
         cdp_wait_connect_timeout_seconds=cdp_wait_connect_timeout_seconds,
+        download_dir=download_dir,
     )
     app.state.chat_handler = ChatHandler(
         pool=pool,
@@ -137,7 +140,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.include_router(create_router())
+    app.include_router(create_openai_router())
     app.include_router(create_anthropic_router())
     app.include_router(create_config_router())
     return app

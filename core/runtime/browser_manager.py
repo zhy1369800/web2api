@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import subprocess
@@ -119,6 +120,7 @@ class BrowserManager:
         cdp_wait_max_attempts: int = 90,
         cdp_wait_interval_seconds: float = 2.0,
         cdp_wait_connect_timeout_seconds: float = 2.0,
+        download_dir: str | Path | None = None,
     ) -> None:
         self._chromium_bin = chromium_bin
         self._headless = headless
@@ -134,6 +136,7 @@ class BrowserManager:
         self._cdp_wait_connect_timeout_seconds = max(
             0.2, float(cdp_wait_connect_timeout_seconds)
         )
+        self._download_dir = download_dir
 
     def _stderr_log_path(self, proxy_key: ProxyKey, port: int) -> Path:
         log_dir = Path(tempfile.gettempdir()) / "web2api-browser-logs"
@@ -384,6 +387,39 @@ class BrowserManager:
                 pass
             self._cleanup_stderr_log(stderr_path)
             raise RuntimeError("浏览器无默认 context")
+
+        # 通过 CDP 显式设置下载目录，避免 Playwright 接管下载后写入临时目录
+        # 以及文件名被替换为 UUID。
+        if self._download_dir is not None and str(self._download_dir).strip():
+            download_dir = Path(self._download_dir).expanduser()
+        else:
+            # 默认：每个 fingerprint 的 user-data-dir 里单独维护 downloads，避免不同实例互相干扰
+            download_dir = user_data_dir(proxy_key.fingerprint_id) / "downloads"
+        try:
+            download_dir.mkdir(parents=True, exist_ok=True)
+            # Playwright 的 CDP 方法在 async/sync API 中返回类型不一定一致：
+            # 这里做兼容：如果返回的是协程再 await，否则直接使用。
+            cdp_session = browser.new_browser_cdp_session()
+            if inspect.isawaitable(cdp_session):
+                cdp_session = await cdp_session
+
+            send_result = cdp_session.send(
+                "Browser.setDownloadBehavior",
+                {
+                    "behavior": "allow",
+                    "downloadPath": str(download_dir),
+                },
+            )
+            if inspect.isawaitable(send_result):
+                await send_result
+        except Exception:
+            logger.warning(
+                "设置下载目录失败（将继续使用默认下载行为）proxy=%s download_dir=%s",
+                proxy_key.fingerprint_id,
+                download_dir,
+                exc_info=True,
+            )
+
         self._entries[proxy_key] = BrowserEntry(
             proc=proc,
             port=port,

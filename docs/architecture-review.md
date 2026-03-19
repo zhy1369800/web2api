@@ -44,23 +44,23 @@ class CanonicalChatRequest(BaseModel):
 **位置**：`core/protocol/service.py`、`core/api/chat_handler.py`
 
 - `CanonicalChatService` 将 **所有** Canonical 请求统一转成 `OpenAIChatRequest`，再交给 `ChatHandler.stream_completion(type_name, OpenAIChatRequest)`。
-- `ChatHandler` 和 `extract_user_content`、`format_react_prompt` 等全部基于 `OpenAIMessage` / `OpenAIChatRequest`。
+- `ChatHandler` 和 `extract_user_content`、`format_tagged_prompt` 等全部基于 `OpenAIMessage` / `OpenAIChatRequest`。
 
 **问题**：
 
 - 协议扩展在“入参/出参形态”上是开放的（新 ProtocolAdapter 即可），但在“内部语义”上被锁死在 OpenAI 风格。
-- 若未来某协议或某插件需要不同的会话/工具语义（例如非 ReAct 的 native function calling、不同 history 裁剪策略），当前没有扩展点，只能改 ChatHandler 或加一堆 if/else。
+- 若未来某协议或某插件需要不同的会话/工具语义（例如 native function calling、不同 history 裁剪策略），当前没有扩展点，只能改 ChatHandler 或加一堆 if/else。
 
 **建议**：
 
 - 中长期考虑让 ChatHandler 接受“内部标准请求”抽象（接口或 dataclass），由 ProtocolAdapter 或 CanonicalChatService 负责“协议 → 内部请求”的转换；当前可保留 `OpenAIChatRequest` 作为默认实现，但入口改为该抽象，便于后续增加其他实现。
-- 工具/ReAct 相关逻辑（如 `format_react_prompt`、解析方式）可抽成“策略”或可插拔实现，以便不同协议/插件选用不同策略。
+- 工具协议相关逻辑（如 `format_tagged_prompt`、解析方式）可抽成“策略”或可插拔实现，以便不同协议/插件选用不同策略。
 
 ---
 
 ### 2.3 路由与协议适配器需手写并手动挂载
 
-**位置**：`core/app.py`、`core/api/routes.py`、`core/api/anthropic_routes.py`
+**位置**：`core/app.py`、`core/api/openai_routes.py`、`core/api/anthropic_routes.py`
 
 - 每种协议：单独一个 router 文件、手动 `create_*_router()`、在 `app.py` 里 `include_router(...)`。
 - 没有“协议注册表”或“根据注册表自动挂路由”的机制。
@@ -125,11 +125,11 @@ register_claude_plugin()
 
 ## 四、交叉关注点
 
-### 4.1 工具 / ReAct 与协议、插件解耦不足
+### 4.1 工具协议与协议、插件解耦不足
 
-**位置**：`core/api/react.py`、`core/api/function_call.py`、`core/api/react_stream_parser.py`；被 OpenAI/Anthropic 适配器及 ChatHandler 共用。
+**位置**：`core/api/tagged_output.py`、`core/api/function_call.py`、`core/api/tagged_stream_parser.py`；被 OpenAI/Anthropic 适配器及 ChatHandler 共用。
 
-- 当前工具调用统一走 ReAct 注入 + 解析，没有“协议原生 tool_use”或“插件自定义工具格式”的扩展点。
+- 当前工具调用统一走 tagged prompt 注入 + 解析，没有“协议原生 tool_use”或“插件自定义工具格式”的扩展点。
 
 **问题**：若某协议或某插件需要原生 function calling 或不同工具格式，需要改多处（适配器、ChatHandler、extract_user_content 等），易产生分支和重复逻辑。
 
@@ -156,7 +156,7 @@ register_claude_plugin()
 | 协议      | 路由与 adapter 手写、手挂                      | 新协议需改多文件，无统一注册      |
 | 插件      | 插件在 app.py 里硬编码注册                     | 新插件必须改主仓，无法配置/发现   |
 | 插件      | 仅 BaseSitePlugin（Cookie+SSE）一种范式        | 非 Cookie/非 SSE 站点实现成本高   |
-| 协议+插件 | 工具/ReAct 与协议、插件强耦合                  | 原生 tools 或自定义工具格式难扩展 |
+| 协议+插件 | tagged 工具协议与协议、插件强耦合             | 原生 tools 或自定义工具格式难扩展 |
 | 协议+插件 | 会话 ID 仅零宽一种方式                         | 其他传递方式需改多处              |
 
 ---
@@ -167,6 +167,6 @@ register_claude_plugin()
 2. **高**：协议注册表 + 统一挂路由，新协议只加 adapter 和注册，不改 app.py。
 3. **中**：CanonicalChatRequest.protocol 改为开放类型（如 str），或由注册表推导。
 4. **中**：ChatHandler 入口抽象为“内部请求接口”，为未来非 OpenAI 形态留扩展点。
-5. **低**：工具/ReAct 策略化；会话 ID 传递方式可插拔。
+5. **低**：tagged 工具协议策略化；会话 ID 传递方式可插拔。
 
 按上述顺序逐步改造，可以在不推翻现有设计的前提下，明显降低协议与插件的扩展成本，并减少对主仓的侵入式修改。

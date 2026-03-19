@@ -8,7 +8,7 @@ from core.plugin.claude import ClaudePlugin
 class TestClaudeImageUpload(unittest.IsolatedAsyncioTestCase):
     async def test_prepare_attachments_uses_wiggle_upload_endpoint(self) -> None:
         plugin = ClaudePlugin()
-        state = {"workspace": {"org_uuid": "org-123"}}
+        state = {"site_context": {"org_uuid": "org-123"}}
         attachment = InputAttachment(
             filename="message_1_image_1.png",
             mime_type="image/png",
